@@ -55,7 +55,7 @@ const DT = 0.016;           // Time step (seconds) ~60fps
 const MAX_HISTORY = 1500;   // Points to keep (~24s at 60fps)
 const PEAK_WINDOW = 300;    // Window for peak calculation (5 seconds)
 const PCV_RISE_SMOOTHING = 0.08;
-const EXP_RESISTANCE_MULTIPLIER = 1.5;
+const EXP_RESISTANCE_MULTIPLIER = 1.2;
 const CIRCUIT_COMPLIANCE = 2.5;
 
 // ===== LANGUAGE STATE (NEW) =====
