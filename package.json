@@ -1,0 +1,42 @@
+{
+  "name": "ventsim-dual-lungs",
+  "version": "2.0.0",
+  "description": "Ventilator Simulator with Dual-Lung Pathology - VCV/PCV/PSV Modes",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "lint": "eslint src --ext .js,.jsx",
+    "test": "vitest",
+    "test:ui": "vitest --ui"
+  },
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "lucide-react": "^0.303.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.2.1",
+    "vite": "^5.0.8",
+    "tailwindcss": "^3.3.6",
+    "postcss": "^8.4.31",
+    "autoprefixer": "^10.4.16",
+    "vitest": "^0.34.6",
+    "@testing-library/react": "^14.1.2",
+    "eslint": "^8.54.0",
+    "eslint-plugin-react": "^7.33.2"
+  },
+  "keywords": [
+    "ventilator",
+    "medical-education",
+    "simulation",
+    "respiratory",
+    "ICU",
+    "ARDS",
+    "COPD",
+    "mechanical-ventilation"
+  ],
+  "author": "Your Name",
+  "license": "MIT"
+}
