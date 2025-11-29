@@ -1,19 +1,131 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import ReactDOM from 'react-dom/client';
-import { Play, Pause, Activity, Settings, BarChart2, AlertCircle, TrendingUp, Zap } from 'lucide-react';
+import { Play, Pause, Activity, Settings, HeartPulse, AlertCircle, TrendingUp, Filter, BarChart2, User, Clock, PauseCircle, StopCircle } from 'lucide-react';
 import { getDynamicCompliance } from './physics/compliance';
 import { getDynamicResistance } from './physics/resistance';
-import { PATHOLOGY_PRESETS } from './physics/pathologyPresets';
+import { PATHOLOGY_PRESETS as PATHOLOGY_PRESETS_MODULE } from './physics/pathologyPresets';
 
-const DT = 0.016;
-const MAX_HISTORY = 1500;
-const PEAK_WINDOW = 300;
-const PCV_RISE_SMOOTHING = 0.08;
+// --- Physics Constants & Types ---
+const DT = 0.016; // Time step (seconds) approx 60fps
+const MAX_HISTORY = 1500; // Points to keep in graph history (approx 24s)
+const PEAK_WINDOW = 300; // Window for real-time peak calculation (~5 seconds)
+
+// NEW CONSTANT: Adjust pressure smoothness in PCV/PSV INS phase (simulates Rise Time/Slope)
+// ค่า 0.08 ทำให้แรงดันเพิ่มขึ้นช้าลงอย่างมาก เพื่อควบคุม Peak Flow และป้องกัน Vt Overshoot ในเคส Compliance สูง
+const PCV_RISE_SMOOTHING = 0.08; 
+// [NEW CONSTANT] ตัวคูณความต้านทานการหายใจออก (ช่วยจำลอง ETT resistance + Expiratory Valve)
+// ปรับลดจาก 2.5 เหลือ 1.5 เพื่อป้องกัน Auto-PEEP ในคนไข้ปกติ (Updated Request)
 const EXP_RESISTANCE_MULTIPLIER = 1.2;
-const CIRCUIT_COMPLIANCE = 2.5;
 
+// [NEW CONSTANT] Circuit Compliance (ml/cmH2O) - ความยืดหยุ่นของสายยาง
+// ค่าปกติประมาณ 2-3 ml/cmH2O ทำให้ Volume บางส่วนหายไปในสาย ไม่เข้าปอด
+const CIRCUIT_COMPLIANCE = 2.5; 
+
+// --- Helper: Linear Interpolation for smooth transitions (Auto-scale & Valve Physics) ---
 const lerp = (start, end, factor) => start + (end - start) * factor;
 
+// --- ADVANCED PHYSICS: DYNAMIC RESISTANCE (Rohrer's Equation & Airway Tethering) ---
+// อ้างอิงจาก PDF: "Resistance increases with increasing airflow" (Turbulence) 
+// และ "Resistance decreases on a hyperbolic curve as airway diameter... stretches" (Volume dependence)
+
+// --- ADVANCED PHYSICS: NON-LINEAR COMPLIANCE & HYSTERESIS (Balloon Effect) ---
+// Logic: รับค่า Total Volume (รวม FRC/AirTrapping) เพื่อคำนวณความตึงตัว (Distension)
+
+// --- Pathology Presets (UPDATED with frcOffset & lungCapacity) ---
+// frcOffset: ปริมาตรลมที่ค้างอยู่เดิม (Hyperinflation/Air Trapping)
+// lungCapacity: ความจุสูงสุดของปอด (Total Lung Capacity - Residual Volume)
+const PATHOLOGY_PRESETS = {
+  NORMAL: { 
+      name: 'Normal (Adult on ETT)', 
+      resL: 15, compL: 50, resR: 15, compR: 50, 
+      shunt: 0.05, deadspace: 0.15, 
+      frcOffset: 0.0, lungCapacity: 3.0, // Normal mechanics
+      note: 'Standard adult on ETT. Normal Curve.' 
+  },
+  ARDS: { 
+      name: 'ARDS (Stiff Lungs)', 
+      resL: 15, compL: 30, resR: 15, compR: 30, 
+      shunt: 0.30, deadspace: 0.35, 
+      frcOffset: 0.0, lungCapacity: 1.0, // Baby Lung (Reduced Capacity)
+      note: 'Low Compliance (Baby Lung). SpO2 drops easily.' 
+  },
+  COPD: { 
+      name: 'COPD (Mild/Mod)', 
+      resL: 20, compL: 60, resR: 20, compR: 60, 
+      shunt: 0.10, deadspace: 0.30, 
+      frcOffset: 1.0, lungCapacity: 3.5, // Mild Hyperinflation
+      note: 'Moderate R. Can exhale fully at low RR/high I:E.' 
+  },
+  EMPHYSEMA: { 
+      name: 'Emphysema (Severe)', 
+      resL: 25, compL: 120, resR: 25, compR: 120, // High C (Floppy Lungs)
+      shunt: 0.15, deadspace: 0.45, 
+      frcOffset: 2.3, lungCapacity: 3.0, // **KEY**: Severe Hyperinflation (Starts near full)
+      note: 'High Compliance but Low Vt due to Severe Air Trapping (Balloon Effect).' 
+  },
+  PULMONARY_EDEMA: { 
+      name: 'Pulmonary Edema', 
+      resL: 15, compL: 25, resR: 15, compR: 25, 
+      shunt: 0.25, deadspace: 0.25, 
+      frcOffset: 0.0, lungCapacity: 2.0,
+      note: 'Fluid in lungs reducing compliance.' 
+  },
+  UNILATERAL_C_DEC: { 
+      name: 'Unilateral Low C (Right)', 
+      resL: 15, compL: 50, resR: 15, compR: 20, 
+      shunt: 0.15, deadspace: 0.20, 
+      frcOffset: 0.0, lungCapacity: 2.5,
+      note: 'Right lung stiff. Flow goes preferentially to Left.' 
+  },
+  CUSTOM: { 
+      name: 'Custom Settings', 
+      resL: 15, compL: 50, resR: 15, compR: 50, 
+      shunt: 0.05, deadspace: 0.15, 
+      frcOffset: 0.0, lungCapacity: 3.0,
+      note: 'Manual control.' 
+  }
+};
+
+// --- Initial State (ADDED Mechanics Parameters) ---
+const INITIAL_STATE = {
+  // Ventilator Settings
+  mode: 'PCV', 
+  tidalVolume: 450, 
+  inspiratoryPressure: 10, 
+  pressureSupport: 10, 
+  eSense: 25, 
+  respiratoryRate: 14, 
+  inspiratoryTime: 1.0, 
+  peep: 5, 
+  flowPattern: 'SQUARE', 
+  apneaTime: 10, 
+  
+  fiO2: 0.40, 
+  
+  // Patient Mechanics
+  pathology: 'NORMAL', 
+  resL: 15, compL: 50,
+  resR: 15, compR: 50,
+  
+  // Advanced Mechanics (Initialized from Normal)
+  shunt: 0.05,       
+  deadspace: 0.15,    
+  frcOffset: 0.0,    // Extra volume already in lung (Trapping)
+  lungCapacity: 3.0, // Max volume before stiffness spikes
+
+  // Patient Data
+  gender: 'M', 
+  heightCm: 170, 
+  actualWeightKg: 70, 
+  weightMode: 'PBW', 
+  
+  // Spontaneous Breathing
+  spontaneousRR: 0, 
+  pmusSyncMode: 'AUTO_SYNC', // [NEW] 'FIGHTING' (Asynchrony) หรือ 'AUTO_SYNC'  
+};
+
+
+// --- Helper Functions ---
 const calculatePBW = (gender, heightCm) => {
   const heightInches = heightCm * 0.393701;
   if (gender === 'M') {
@@ -23,205 +135,862 @@ const calculatePBW = (gender, heightCm) => {
   }
 };
 
-function App() {
-  const [params, setParams] = useState({
-    mode: 'PCV',
-    tidalVolume: 450,
-    inspiratoryPressure: 10,
-    pressureSupport: 10,
-    eSense: 25,
-    respiratoryRate: 14,
-    inspiratoryTime: 1.0,
-    peep: 5,
-    flowPattern: 'SQUARE',
-    apneaTime: 10,
-    fiO2: 0.40,
-    pathology: 'NORMAL',
-    resL: 15, compL: 50, resR: 15, compR: 50,
-    shunt: 0.05, deadspace: 0.15, frcOffset: 0.0, lungCapacity: 3.0,
-    gender: 'M', heightCm: 170, actualWeightKg: 70,
-    spontaneousRR: 0,
-    pmusSyncMode: 'AUTO_SYNC'
-  });
 
+const App = () => {
+  // --- State Management ---
+  const [params, setParams] = useState(INITIAL_STATE);
   const [isRunning, setIsRunning] = useState(false);
   const [isRecruiting, setIsRecruiting] = useState(false);
-  const [inspHoldRequest, setInspHoldRequest] = useState(false);
-  const [expHoldRequest, setExpHoldRequest] = useState(false);
-  const [holdStatus, setHoldStatus] = useState(null);
-  const [backupActive, setBackupActive] = useState(false);
-
+  
+  // Auto-Scale State (Dynamic Y-Axis Limits for UI Text)
   const [scales, setScales] = useState({ pMax: 40, fMax: 60, vMax: 600 });
-  const scalesRef = useRef(scales);
-  const displayedScalesRef = useRef(scales);
+  
+  const scalesRef = useRef({ pMax: 40, fMax: 60, vMax: 600 });
+  const displayedScalesRef = useRef({ pMax: 40, fMax: 60, vMax: 600 });
 
   const [monitoredValues, setMonitoredValues] = useState({
-    Pplat: 0, Pmean: 0, Cstat: 0, AutoPEEP: 0,
-    TotalRR: 0, MV: 0, VtExp: 0, VPeakAbs: 0, VPeakRel: 0,
-    SpO2: 98, EtCO2: 35
+    Pplat: 0, Pmean: 0, Cstat: 0, AutoPEEP: 0, TotalRR: 0, MV: 0, VtExp: 0, 
+    VPeakAbs: 0, 
+    VPeakRel: 0,
+    SpO2: 98, 
+    EtCO2: 35 
   });
+  const [backupActive, setBackupActive] = useState(false); 
 
+  // --- New State for Holds ---
+  const [inspHoldRequest, setInspHoldRequest] = useState(false);
+  const [expHoldRequest, setExpHoldRequest] = useState(false);
+  const [holdStatus, setHoldStatus] = useState(null); 
+
+  // Simulation State
   const simState = useRef({
-    time: 0, cycleTime: 0, patientTime: 0, phase: 'EXP',
-    volL: 0, volR: 0, paw: 0, flowTotal: 0, flowL: 0, flowR: 0,
-    valveFlow: 0, valvePressure: 0, volCircuit: 0,
+    time: 0,
+    cycleTime: 0,     
+    patientTime: 0,   
+    phase: 'EXP',     
+    volL: 0, volR: 0, 
+    paw: 0, flowTotal: 0, flowL: 0, flowR: 0,
+    
+    valveFlow: 0, valvePressure: 0,
+    volCircuit: 0,
+
     recruitmentTimer: 0, recruitmentStep: 0,
-    pawSum: 0, pawCount: 0, pPlatTemp: 0, autoPeepTemp: 0,
-    volPeakCycle: 0, currentPeakFlow: 0,
-    lastBreathTime: Date.now(), timeSinceLastBreath: 0,
-    isBackupCycle: false, holdTimer: 0, pPlatCaptured: false
+    pawSum: 0, pawCount: 0,
+    pPlatTemp: 0, autoPeepTemp: 0, 
+    volPeakCycle: 0, currentPeakFlow: 0, 
+    lastBreathTime: Date.now(), 
+    timeSinceLastBreath: 0,
+    isBackupCycle: false, 
+    
+    holdTimer: 0,
+    pPlatCaptured: false,
   });
 
+  // Data History for Graphs
   const history = useRef({
     paw: new Array(MAX_HISTORY).fill(0),
     flow: new Array(MAX_HISTORY).fill(0),
     flowL: new Array(MAX_HISTORY).fill(0),
     flowR: new Array(MAX_HISTORY).fill(0),
-    vol: new Array(MAX_HISTORY).fill(0),
-    currentLoopPV: [],
+    vol: new Array(MAX_HISTORY).fill(0), 
+    currentLoopPV: [], 
     currentLoopFV: [],
-    lastLoopPV: [],
-    lastLoopFV: []
+    lastLoopPV: [], 
+    lastLoopFV: [],
   });
 
+  // Canvas Refs
   const canvasRefP = useRef(null);
   const canvasRefF = useRef(null);
   const canvasRefV = useRef(null);
-  const canvasRefPV = useRef(null);
-  const canvasRefFV = useRef(null);
-
+  const canvasRefPV = useRef(null); 
+  const canvasRefFV = useRef(null); 
+  
+  // --- Derived Calculations ---
   const derivedParams = useMemo(() => {
     const cycleDuration = 60 / params.respiratoryRate;
     const inspDuration = params.inspiratoryTime;
-    const TiMax = cycleDuration * 0.95;
+    const TiMax = cycleDuration * 0.95; 
     const safeTi = Math.min(inspDuration, TiMax - 0.05);
+
     const expDuration = cycleDuration - safeTi;
-
-    const VtL = params.tidalVolume / 1000;
-    let requiredFlow = params.flowPattern === 'SQUARE' ? VtL / safeTi : (2 * VtL) / safeTi;
-
-    const C_Total_ml = params.compL + params.compR;
+    const ieRatioDisplay = expDuration / safeTi;
+    
+    // VCV Flow calculation
+    const Vt_L = params.tidalVolume / 1000;
+    let requiredFlow = 0;
+    if (params.flowPattern === 'SQUARE') {
+      requiredFlow = Vt_L / safeTi; 
+    } else { 
+      requiredFlow = 2 * Vt_L / safeTi; 
+    }
+    
+    const C_Total_ml = params.compL + params.compR; 
     const PBW = calculatePBW(params.gender, params.heightCm);
     const safeVtMin = Math.round(4 * PBW);
     const safeVtMax = Math.round(8 * PBW);
 
+    // --- PMUS CALCULATION ---
     const calculatedPmus = params.spontaneousRR * 0.5;
+    
     let pmusStatus = "None";
     let pmusColor = "text-gray-500";
+    
     if (params.spontaneousRR > 0) {
-      if (calculatedPmus < 5) {
-        pmusStatus = "Low Effort";
-        pmusColor = "text-blue-600";
-      } else if (calculatedPmus <= 10) {
-        pmusStatus = "Normal";
-        pmusColor = "text-emerald-600";
-      } else {
-        pmusStatus = "High Effort";
-        pmusColor = "text-red-600";
-      }
+        if (calculatedPmus < 5) {
+            pmusStatus = "Low Effort";
+            pmusColor = "text-blue-600";
+        } else if (calculatedPmus <= 10) {
+            pmusStatus = "Normal";
+            pmusColor = "text-emerald-600";
+        } else {
+            pmusStatus = "High Effort";
+            pmusColor = "text-red-600";
+        }
     }
 
     return {
       cycleDuration,
       inspDuration: safeTi,
-      expDuration,
-      ieRatio: (expDuration / safeTi).toFixed(1),
+      expDuration, 
+      ieRatioDisplay: isFinite(ieRatioDisplay) ? ieRatioDisplay.toFixed(1) : '0.0',
       requiredFlowLps: requiredFlow,
       requiredFlowLpm: requiredFlow * 60,
       C_Total_ml,
       PBW: PBW.toFixed(1),
       safeVtRange: `${safeVtMin}-${safeVtMax} ml`,
       isVtSafe: (params.tidalVolume >= safeVtMin && params.tidalVolume <= safeVtMax),
+      TiMax: TiMax.toFixed(2),
       pmusMagnitude: calculatedPmus,
       pmusStatus,
       pmusColor
     };
   }, [params]);
 
+
+  // --- State Initialization and Reset ---
   const resetSimState = useCallback(() => {
     const p = params;
-    const C_L_Lps = p.compL / 1000;
+    
+    // Initial Volumes based on PEEP and Compliance (L=C*P)
+    const C_L_Lps = p.compL / 1000; 
     const C_R_Lps = p.compR / 1000;
-    const V_L_PEEP = (p.peep * C_L_Lps) + (p.frcOffset / 2);
-    const V_R_PEEP = (p.peep * C_R_Lps) + (p.frcOffset / 2);
+    
+    // [PHYSICS UPDATE] Initial Volume must include FRC Offset (Trapped Air)
+    const V_L_PEEP = (p.peep * C_L_Lps) + (p.frcOffset / 2); 
+    const V_R_PEEP = (p.peep * C_R_Lps) + (p.frcOffset / 2); 
+
+    // Initial Abs Volume includes PEEP
     const initialVolAbs = (V_L_PEEP + V_R_PEEP) * 1000;
 
     simState.current = {
-      time: 0, cycleTime: 0, patientTime: 0, phase: 'EXP',
-      volL: V_L_PEEP, volR: V_R_PEEP,
-      paw: p.peep, valveFlow: 0, valvePressure: p.peep,
-      volCircuit: (p.peep * CIRCUIT_COMPLIANCE) / 1000,
-      flowTotal: 0, flowL: 0, flowR: 0,
-      recruitmentTimer: 0, recruitmentStep: 0,
-      pawSum: 0, pawCount: 0, pPlatTemp: p.peep, autoPeepTemp: p.peep,
-      volPeakCycle: initialVolAbs, currentPeakFlow: 0,
-      lastBreathTime: Date.now(), timeSinceLastBreath: 0,
-      isBackupCycle: false, holdTimer: 0, pPlatCaptured: false
+        time: 0, cycleTime: 0, patientTime: 0, phase: 'EXP',
+        volL: V_L_PEEP, volR: V_R_PEEP, paw: p.peep, 
+        valveFlow: 0, valvePressure: p.peep, 
+        volCircuit: (p.peep * CIRCUIT_COMPLIANCE) / 1000, 
+        flowTotal: 0, flowL: 0, flowR: 0,
+        recruitmentTimer: 0, recruitmentStep: 0,
+        pawSum: 0, pawCount: 0,
+        pPlatTemp: p.peep, autoPeepTemp: p.peep, 
+        volPeakCycle: initialVolAbs, currentPeakFlow: 0, 
+        lastBreathTime: Date.now(),
+        timeSinceLastBreath: 0,
+        isBackupCycle: false,
+        holdTimer: 0,
+        pPlatCaptured: false,
     };
 
     history.current.paw.fill(p.peep);
     history.current.flow.fill(0);
     history.current.flowL.fill(0);
     history.current.flowR.fill(0);
-    history.current.vol.fill(0);
+    history.current.vol.fill(0);  
+    
     history.current.currentLoopPV = [];
     history.current.currentLoopFV = [];
     history.current.lastLoopPV = [];
     history.current.lastLoopFV = [];
-
-    const initScales = {
-      pMax: p.inspiratoryPressure + p.peep + 10,
-      fMax: 60,
-      vMax: p.tidalVolume + 200
-    };
+    
+    const initScales = { pMax: p.inspiratoryPressure + p.peep + 10, fMax: 60, vMax: p.tidalVolume + 200 };
     setScales(initScales);
     scalesRef.current = initScales;
     displayedScalesRef.current = initScales;
 
-    setMonitoredValues({
-      Pplat: p.peep, Pmean: p.peep, Cstat: 0, AutoPEEP: 0,
-      TotalRR: 0, MV: 0, VtExp: 0, VPeakAbs: initialVolAbs, VPeakRel: 0,
+    setMonitoredValues({ 
+      Pplat: p.peep, Pmean: p.peep, Cstat: 0, AutoPEEP: 0, TotalRR: 0, MV: 0, VtExp: 0, 
+      VPeakAbs: initialVolAbs,
+      VPeakRel: 0,
       SpO2: 98, EtCO2: 35
-    });
+    }); 
     setBackupActive(false);
     setInspHoldRequest(false);
     setExpHoldRequest(false);
     setHoldStatus(null);
-  }, [params.compL, params.compR, params.peep, params.frcOffset, params.inspiratoryPressure, params.tidalVolume]);
+
+  }, [params.compL, params.compR, params.resL, params.resR, params.pathology, params.mode, params.frcOffset, params.lungCapacity]); 
 
   useEffect(() => {
     resetSimState();
-  }, [resetSimState]);
+  }, [resetSimState]); 
+  
+  // Logic to apply pathology preset (UPDATED)
+  const handlePathologyChange = (e) => {
+    const newPathology = e.target.value;
+    const preset = PATHOLOGY_PRESETS[newPathology] || PATHOLOGY_PRESETS['NORMAL'];
+    
+    setParams(p => ({
+      ...p,
+      pathology: newPathology,
+      resL: preset.resL, compL: preset.compL,
+      resR: preset.resR, compR: preset.compR,
+      shunt: preset.shunt, 
+      deadspace: preset.deadspace,
+      // [PHYSICS UPDATE] Update Mechanics Params from Preset
+      frcOffset: preset.frcOffset,
+      lungCapacity: preset.lungCapacity
+    }));
+  };
 
-  // --- Main Animation Loop (Animation Frame Rendering) ---
+  useEffect(() => {
+    if (params.pathology !== 'CUSTOM') {
+      const preset = PATHOLOGY_PRESETS[params.pathology];
+      setParams(p => ({
+        ...p, resL: preset.resL, compL: preset.compL, resR: preset.resR, compR: preset.compR,
+        shunt: preset.shunt,
+        deadspace: preset.deadspace,
+        frcOffset: preset.frcOffset,
+        lungCapacity: preset.lungCapacity
+      }));
+    }
+  }, [params.pathology]);
+
+
+  // --- Physics Engine (Updated with Balloon Effect & Emphysema Logic) ---
+  const updatePhysics = useCallback(() => {
+    if (!isRunning) return;
+
+    const s = simState.current;
+    const p = params;
+    const d = derivedParams;
+
+    s.time += DT;
+    if (s.phase !== 'HOLD_INS' && s.phase !== 'HOLD_EXP') {
+        s.cycleTime += DT;
+    }
+    
+    // [NEW LOGIC] Auto Sync Logic (Simulates patient relaxing and syncing to the machine)
+    let patientTimeCorrection = 0;
+    const patientCycleDur = 60 / p.spontaneousRR;
+
+    if (p.spontaneousRR > 0 && p.pmusSyncMode === 'AUTO_SYNC' && s.phase === 'INS') {
+        // Patient tries to align the end of their exhalation with machine's start of inspiration
+        const patientPhase = s.patientTime / patientCycleDur;
+
+        // If patient is in the last 30% of their cycle (i.e., trying to exhale, Phase > 0.7),
+        // we slightly speed up their cycle duration (increase patientTime) to align to machine's INS start.
+        if (patientPhase > 0.7) { 
+            const SYNC_FACTOR = 0.0005; // Very small factor for slow sync (approx 60-90s)
+            patientTimeCorrection = patientCycleDur * SYNC_FACTOR; 
+        }
+    }
+    
+    s.patientTime += DT + patientTimeCorrection; // Apply correction here
+    s.timeSinceLastBreath += DT;
+    
+    // --- LUNG MECHANICS (Calculated with FRC Offset) ---
+    // Emphysema Logic: p.lungCapacity determines when "Balloon" gets stiff.
+    const CL_dynamic = getDynamicCompliance(s.volL, p.compL, p.pathology, s.phase, p.lungCapacity/2);
+    const CR_dynamic = getDynamicCompliance(s.volR, p.compR, p.pathology, s.phase, p.lungCapacity/2);
+    
+    const RL_dynamic = getDynamicResistance(p.resL, s.flowL, s.volL, p.pathology);
+    const RR_dynamic = getDynamicResistance(p.resR, s.flowR, s.volR, p.pathology);
+    
+    // Volume at PEEP baseline (Theoretical - if lung was normal)
+    const V_PEEP_L_Total_Theoretical = (p.peep * ((p.compL + p.compR) / 1000)) + p.frcOffset;
+
+    // Current Absolute Volume
+    const V_Absolute_L_Current = s.volL + s.volR;
+    
+    // Display Offset (Relative Volume for Graph - Zero at start of breath)
+    // We remove the FRC/Trapped air from the visual graph so user sees Tidal Volume
+    const V_Relative_mL_Current = Math.max(0, (V_Absolute_L_Current * 1000) - ((p.peep * (p.compL + p.compR)) + (p.frcOffset * 1000))); 
+    
+
+    // --- Trigger Logic & Asynchrony ---
+    let triggerBreath = false;
+    let Pmus = 0;
+    let isApneaTrigger = false;
+
+    // 1. Apnea Check
+    if (p.mode === 'PSV' && s.timeSinceLastBreath > p.apneaTime) {
+        triggerBreath = true;
+        isApneaTrigger = true;
+    }
+
+    /// 2. Patient Trigger & Pmus Generation
+    if (p.spontaneousRR > 0) {
+        const patientCycleDur = 60 / p.spontaneousRR;
+        if (s.patientTime >= patientCycleDur) s.patientTime = 0;
+        
+        // Ti_mus: Inspiratory phase duration of patient (e.g., 40%)
+        const Ti_mus = patientCycleDur * 0.4; 
+        const t_mus = s.patientTime;
+        
+        // --- INSPIRATORY EFFORT (Negative Pmus) ---
+        if (t_mus < Ti_mus) { 
+             const normalizedT = t_mus / (Ti_mus * 0.3); 
+             const intensity = d.pmusMagnitude * 2.5; 
+             // Pmus is negative (inspiratory pull)
+             Pmus = -1 * intensity * (t_mus/Ti_mus) * Math.exp(1 - (t_mus/(Ti_mus*0.3)));
+             
+             if (Pmus < -d.pmusMagnitude) Pmus = -d.pmusMagnitude;
+             
+             // Trigger logic
+             if (s.phase === 'EXP' && p.mode === 'PSV' && !triggerBreath) {
+                 triggerBreath = true; 
+             }
+        } 
+        // --- [NEW LOGIC] EXPIRATORY EFFORT (Positive Pmus) ---
+        // Pmus > 0 simulates active exhalation (Abdominal Muscle use/Cough)
+        // Active effort is modeled to start at 70% of patient cycle duration
+        else if (t_mus >= patientCycleDur * 0.7) { 
+            const t_exp_active = t_mus - (patientCycleDur * 0.7);
+            const active_duration = patientCycleDur * 0.3; // Active for 30% of cycle
+            const intensity = d.pmusMagnitude * 0.5; // Expiratory effort (set to 50% of inspiratory magnitude)
+            
+            // Positive Pmus, decaying towards the end of the cycle (peak at start of 70% mark)
+            Pmus = intensity * (1 - (t_exp_active / active_duration));
+            
+            if (Pmus < 0) Pmus = 0; // Safety clamp
+            
+        } else {
+             Pmus = 0;
+        }
+
+        if (s.phase === 'EXP' && s.cycleTime < 0.3 && Pmus < -2) {
+             triggerBreath = true;
+        }
+    }
+      
+    // 3. Machine Trigger
+    if (p.mode !== 'PSV' && s.cycleTime >= d.cycleDuration) {
+        if (expHoldRequest) {
+             if (s.phase !== 'HOLD_EXP') {
+                 s.phase = 'HOLD_EXP';
+                 s.holdTimer = 0;
+                 setHoldStatus('EXP_HOLD');
+             }
+        } else {
+            triggerBreath = true;
+        }
+    }
+    
+    if (s.phase === 'HOLD_EXP' && !expHoldRequest) {
+        triggerBreath = true;
+        setHoldStatus(null);
+    }
+
+    // --- PHYSICS SOLVER CONSTANTS ---
+    let effectiveRL = RL_dynamic; 
+    let effectiveRR = RR_dynamic; 
+    
+    if (s.phase === 'EXP' || s.phase === 'HOLD_EXP') {
+        effectiveRL *= EXP_RESISTANCE_MULTIPLIER; 
+        effectiveRR *= EXP_RESISTANCE_MULTIPLIER; 
+    }
+
+    const RL = effectiveRL; 
+    const RR = effectiveRR;
+    
+    // --- Phase Transition & Monitor Update ---
+    if (triggerBreath && s.phase !== 'INS' && s.phase !== 'HOLD_INS') {
+        const now = Date.now();
+        let instantRR = monitoredValues.TotalRR; 
+        if (s.lastBreathTime > 0) {
+             const breathDurMs = now - s.lastBreathTime;
+             if (breathDurMs > 500) { 
+                 instantRR = 60000 / breathDurMs;
+             }
+        }
+        s.lastBreathTime = now;
+
+        const PelL_EndExp = s.volL / CL_dynamic;
+        const PelR_EndExp = s.volR / CR_dynamic;
+        const PalvMean = (PelL_EndExp + PelR_EndExp) / 2;
+        const calcAutoPEEP = Math.max(0, PalvMean - p.peep);
+
+        const V_EndExp_mL = (s.volL + s.volR) * 1000;
+        const Vt_Final_mL = Math.max(0, s.volPeakCycle - V_EndExp_mL);
+
+        let calculatedCstat = 0;
+        const drivingPressure = Math.max(1, s.pPlatTemp - p.peep);
+        if (drivingPressure > 1 && Vt_Final_mL > 50) {
+            calculatedCstat = Vt_Final_mL / drivingPressure;
+        }
+        if (calculatedCstat > 200) calculatedCstat = 200;
+
+        const VPeakAbs_Measured = s.volPeakCycle;
+        // PEEP Volume should account for FRC offset for display consistency relative to baseline
+        const V_PEEP_Vol_mL = (p.peep * (p.compL + p.compR)) + (p.frcOffset * 1000);
+        const VPeakRel_Derived = Math.max(0, VPeakAbs_Measured - V_PEEP_Vol_mL);
+
+        // --- Oxygenation Model ---
+        const baseShunt = p.shunt;        
+        const baseDeadspace = p.deadspace; 
+        
+        const PmeanEffect = Math.max(0, (s.pawSum / Math.max(1, s.pawCount)) - 5) * 0.01; 
+        const actualShunt = Math.max(0.01, baseShunt - PmeanEffect);
+        
+        let estimatedSpO2 = 99;
+        estimatedSpO2 -= (actualShunt * 100) * 1.5; 
+        
+        const fio2EffectFactor = (p.fiO2 - 0.40) * 15; 
+        estimatedSpO2 += fio2EffectFactor;
+
+        if (estimatedSpO2 > 100) estimatedSpO2 = 100;
+        if (estimatedSpO2 < 50) estimatedSpO2 = 50;
+
+        const idealMV = 6.0; 
+        const effectiveMV = (instantRR * Vt_Final_mL / 1000) * (1 - baseDeadspace);
+        let estimatedEtCO2 = 40 * (idealMV / Math.max(0.1, effectiveMV));
+        if (estimatedEtCO2 > 100) estimatedEtCO2 = 100;
+        if (estimatedEtCO2 < 10) estimatedEtCO2 = 10;
+
+        setMonitoredValues(m => ({
+             ...m,
+             TotalRR: instantRR,
+             MV: (instantRR * Vt_Final_mL) / 1000,
+             VtExp: Vt_Final_mL,
+             VPeakAbs: VPeakAbs_Measured,
+             VPeakRel: VPeakRel_Derived,
+             AutoPEEP: calcAutoPEEP,
+             Cstat: calculatedCstat,
+             Pplat: s.pPlatTemp,
+             Pmean: s.pawSum / Math.max(1, s.pawCount),
+             SpO2: Math.round(estimatedSpO2), 
+             EtCO2: Math.round(estimatedEtCO2) 
+        }));
+
+        s.phase = 'INS';
+        s.cycleTime = 0; 
+        s.currentPeakFlow = 0;
+        s.timeSinceLastBreath = 0; 
+        s.isBackupCycle = isApneaTrigger;
+        
+        if (backupActive !== s.isBackupCycle) setBackupActive(s.isBackupCycle);
+
+        if (history.current.currentLoopPV.length > 10) {
+            history.current.lastLoopPV = [...history.current.currentLoopPV];
+            history.current.lastLoopFV = [...history.current.currentLoopFV];
+        }
+        history.current.currentLoopPV = []; 
+        history.current.currentLoopFV = [];
+        
+        s.pawSum = 0; 
+        s.pawCount = 0;
+        s.pPlatCaptured = false;
+        s.volPeakCycle = V_EndExp_mL; 
+    }
+
+    let targetFlow = 0; 
+    let targetPaw = null; 
+    let targetMode = 'PC'; 
+
+    if (isRecruiting) {
+      s.recruitmentTimer += DT;
+      targetMode = 'PC';
+      if (s.recruitmentTimer < 10) targetPaw = 30; 
+      else if (s.recruitmentTimer < 20) targetPaw = 40; 
+      else targetPaw = p.peep; 
+      s.phase = 'REC';
+    }
+    else if (s.phase === 'HOLD_INS') {
+        targetMode = 'PC';
+        targetFlow = 0;
+        const P_static = ((s.volL + s.volR) / (CL_dynamic + CR_dynamic) * 2) + p.peep; 
+        targetPaw = P_static; 
+
+        if (!s.pPlatCaptured) {
+             const Pplat_Realtime = s.paw; 
+             // Calculate Vt for Cstat based on Volume added during this breath
+             const Vt_Current = ((s.volL + s.volR) * 1000) - ((p.peep * (p.compL + p.compR)) + (p.frcOffset * 1000)); 
+             const drivingP = Math.max(1, Pplat_Realtime - p.peep);
+             setMonitoredValues(m => ({...m, Pplat: Pplat_Realtime, Cstat: Vt_Current / drivingP}));
+        }
+
+        if (!inspHoldRequest) {
+            s.phase = 'EXP';
+            setHoldStatus(null);
+        }
+    }
+    else if (s.phase === 'HOLD_EXP') {
+        targetMode = 'PC';
+        targetFlow = 0;
+        targetPaw = p.peep; 
+        const P_static_exp = (s.volL / CL_dynamic + s.volR / CR_dynamic) / 2;
+        targetPaw = P_static_exp; 
+        setMonitoredValues(m => ({...m, AutoPEEP: Math.max(0, P_static_exp - p.peep)}));
+        
+        if (!expHoldRequest) {
+             triggerBreath = true; 
+             setHoldStatus(null);
+        }
+    }
+    else if (s.phase === 'INS') {
+        const effectiveMode = (p.mode === 'PSV' && s.isBackupCycle) ? 'PCV' : p.mode;
+        let endInsp = false;
+
+        if (effectiveMode === 'VCV') {
+          targetMode = 'VC';
+          if (V_Relative_mL_Current >= p.tidalVolume) endInsp = true; 
+          else if (s.cycleTime >= d.inspDuration) endInsp = true;
+          
+          if (endInsp) targetFlow = 0; 
+          else {
+            if (p.flowPattern === 'SQUARE') targetFlow = d.requiredFlowLps; 
+            else targetFlow = Math.max(0, d.requiredFlowLps * (1 - s.cycleTime / d.inspDuration));
+          }
+        }
+        else if (effectiveMode === 'PCV') {
+          targetMode = 'PC';
+          if (s.cycleTime < d.inspDuration) targetPaw = p.inspiratoryPressure + p.peep; 
+          else endInsp = true;
+        }
+        else if (effectiveMode === 'PSV') {
+          targetMode = 'PC';
+          targetPaw = p.pressureSupport + p.peep;
+          
+          const currentInspFlow = s.flowTotal * 60; 
+          if (s.cycleTime > 0.1) {
+              s.currentPeakFlow = Math.max(s.currentPeakFlow, currentInspFlow);
+              const flowThreshold = s.currentPeakFlow * (p.eSense / 100);
+              if ((currentInspFlow < flowThreshold && s.currentPeakFlow > 10) || s.cycleTime > 3.0 || currentInspFlow < -5) {
+                  endInsp = true; 
+              }
+          }
+        }
+        
+        if (endInsp) {
+            if (inspHoldRequest) {
+                s.phase = 'HOLD_INS';
+                setHoldStatus('INSP_HOLD');
+                s.holdTimer = 0;
+            } else {
+                s.phase = 'EXP';
+            }
+        }
+    } 
+    else {
+      s.phase = 'EXP';
+      targetMode = 'PC';
+      targetPaw = p.peep; 
+      
+      if (Math.abs(s.flowTotal) > 0.5) {
+          targetPaw += Math.sin(s.time * 50) * 0.2; // Flutter
+      }
+    }
+    
+    // --- PHYSICS SOLVER ---
+    const PelL = s.volL / CL_dynamic; 
+    const PelR = s.volR / CR_dynamic;
+    const PalvL = PelL + Pmus; 
+    const PalvR = PelR + Pmus; 
+    
+    let currentPaw = 0;
+    const smoothing = 0.2;
+
+    if (targetMode === 'PC') {
+      let currentSmoothing = smoothing;
+      if (s.phase === 'INS') currentSmoothing = PCV_RISE_SMOOTHING;
+
+      if (s.phase.includes('HOLD')) s.valvePressure = lerp(s.valvePressure, targetPaw, 0.1); 
+      else s.valvePressure = lerp(s.valvePressure, targetPaw, currentSmoothing);
+      
+      currentPaw = s.valvePressure;
+
+      s.flowL = (currentPaw - PalvL) / RL;
+      s.flowR = (currentPaw - PalvR) / RR;
+      
+    } else { // VC
+      s.valveFlow = lerp(s.valveFlow, targetFlow, smoothing);
+      const totalFlow = s.valveFlow;
+      const GL = 1/RL; const GR = 1/RR;
+      currentPaw = (totalFlow + (PalvL * GL) + (PalvR * GR)) / (GL + GR);
+      s.paw = currentPaw; 
+      s.flowL = (currentPaw - PalvL) / RL;
+      s.flowR = (currentPaw - PalvR) / RR;
+    }
+
+    const prevVolCircuit = s.volCircuit;
+    const newVolCircuit = (currentPaw * CIRCUIT_COMPLIANCE) / 1000; 
+    s.volCircuit = newVolCircuit;
+    const flowCircuit = (newVolCircuit - prevVolCircuit) / DT; 
+    
+    s.flowTotal = s.flowL + s.flowR + flowCircuit;
+
+    s.paw = currentPaw;
+    s.volL += s.flowL * DT;
+    s.volR += s.flowR * DT;
+
+    if (s.volL < 0) s.volL = 0;
+    if (s.volR < 0) s.volR = 0;
+
+    const V_Absolute_mL = (s.volL + s.volR) * 1000;
+    
+    s.pawSum += s.paw;
+    s.pawCount += 1;
+    
+    if (s.phase === 'INS') {
+        s.volPeakCycle = Math.max(s.volPeakCycle, V_Absolute_mL);
+        if (s.cycleTime > d.inspDuration * 0.95) s.pPlatTemp = (PalvL + PalvR) / 2; 
+    }
+
+    history.current.paw.push(s.paw);
+    history.current.flow.push(s.flowTotal * 60);
+    history.current.flowL.push(s.flowL * 60);
+    history.current.flowR.push(s.flowR * 60); 
+    history.current.vol.push(V_Relative_mL_Current); 
+
+    history.current.currentLoopPV.push({ p: s.paw, v: V_Relative_mL_Current });
+    history.current.currentLoopFV.push({ f: s.flowTotal * 60, v: V_Relative_mL_Current });
+
+    if (history.current.paw.length > MAX_HISTORY) {
+      history.current.paw.shift();
+      history.current.flow.shift();
+      history.current.flowL.shift(); 
+      history.current.flowR.shift();
+      history.current.vol.shift();
+    }
+
+  }, [isRunning, isRecruiting, params, derivedParams, backupActive, inspHoldRequest, expHoldRequest, monitoredValues.TotalRR]);
+
+  // --- AUTO SCALE LOGIC ---
+  const updateAutoScales = useCallback(() => {
+      const recentPaw = history.current.paw.slice(-PEAK_WINDOW);
+      const recentFlow = history.current.flow.slice(-PEAK_WINDOW);
+      const recentVol = history.current.vol.slice(-PEAK_WINDOW);
+      const maxP = Math.max(20, ...recentPaw); 
+      const maxF = Math.max(15, ...recentFlow.map(Math.abs)); 
+      const maxV = Math.max(200, ...recentVol); 
+
+      scalesRef.current.pMax = lerp(scalesRef.current.pMax, maxP * 1.2, 0.05);
+      scalesRef.current.fMax = lerp(scalesRef.current.fMax, maxF * 1.2, 0.05);
+      scalesRef.current.vMax = lerp(scalesRef.current.vMax, maxV * 1.2, 0.05);
+
+      const diffP = Math.abs(scalesRef.current.pMax - displayedScalesRef.current.pMax);
+      const diffF = Math.abs(scalesRef.current.fMax - displayedScalesRef.current.fMax);
+      const diffV = Math.abs(scalesRef.current.vMax - displayedScalesRef.current.vMax);
+
+      if (diffP > 1 || diffF > 2 || diffV > 10) {
+          const newScales = { 
+            pMax: scalesRef.current.pMax, 
+            fMax: scalesRef.current.fMax, 
+            vMax: scalesRef.current.vMax 
+          };
+          setScales(newScales);
+          displayedScalesRef.current = newScales;
+      }
+  }, []);
+
+  // --- Drawing ---
+  const drawWaveforms = useCallback(() => {
+    const ctxP = canvasRefP.current?.getContext('2d');
+    const ctxF = canvasRefF.current?.getContext('2d');
+    const ctxV = canvasRefV.current?.getContext('2d');
+
+    if (!ctxP || !ctxF || !ctxV) return;
+    
+    updateAutoScales(); 
+
+    const w = ctxP.canvas.width;
+    const h = ctxP.canvas.height;
+    
+    ctxP.clearRect(0, 0, w, h);
+    ctxF.clearRect(0, 0, w, h);
+    ctxV.clearRect(0, 0, w, h);
+    
+    const sP = scalesRef.current.pMax;
+    const sF = scalesRef.current.fMax;
+    const sV = scalesRef.current.vMax;
+
+    const drawLine = (ctx, data, color, yMax, yMin = 0, midZero = false) => {
+      ctx.beginPath();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      let scale;
+      let offset = 0; 
+      if (midZero) {
+          const range = yMax + Math.abs(yMin);
+          scale = h / range;
+          offset = Math.abs(yMin) * scale;
+      } else {
+          scale = (h - 10) / yMax; 
+          offset = 10;
+      }
+      data.forEach((val, i) => {
+        const x = 35 + ((i / MAX_HISTORY) * (w - 35)); 
+        const y = h - ((val * scale) + offset); 
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+    };
+
+    const drawAxisAndGrid = (ctx, yMaxPos, yMaxNeg = 0, yLabel, yColor, midZero = false) => {
+      const h = ctx.canvas.height;
+      const w = ctx.canvas.width;
+      ctx.strokeStyle = '#374151'; ctx.fillStyle = '#f3f4f6'; ctx.font = '10px sans-serif'; ctx.textAlign = 'right';
+
+      if (midZero) {
+          const totalRange = yMaxPos + yMaxNeg;
+          const scale = h / totalRange;
+          const zeroYPos = h - (yMaxNeg * scale); 
+          ctx.beginPath(); ctx.strokeStyle = '#9ca3af'; ctx.moveTo(35, zeroYPos); ctx.lineTo(w, zeroYPos); ctx.stroke();
+          const steps = 4;
+          for(let i=0; i<=steps; i++) {
+              let val = yMaxPos - (i * (yMaxPos)/steps);
+              let y = zeroYPos - (val * scale);
+              if (y < 0) continue;
+              ctx.beginPath(); ctx.strokeStyle = '#374151'; ctx.moveTo(35, y); ctx.lineTo(w, y); ctx.stroke();
+              ctx.fillText(val.toFixed(0), 32, y+3);
+          }
+          for(let i=0; i<=steps; i++) {
+              let val = yMaxNeg - (i * (yMaxNeg)/steps);
+              let y = zeroYPos + (val * scale);
+              if (y > h) continue;
+              ctx.beginPath(); ctx.strokeStyle = '#374151'; ctx.moveTo(35, y); ctx.lineTo(w, y); ctx.stroke();
+              if (val !== 0) ctx.fillText('-'+val.toFixed(0), 32, y+3);
+          }
+      } else {
+          const yMax = yMaxPos;
+          const numYTicks = 5; 
+          for (let i = 0; i <= numYTicks; i++) {
+              let yValue = ((numYTicks - i) * (yMax / numYTicks)).toFixed(0);
+              let yPos = (i / numYTicks) * (h - 10) + 5; 
+              ctx.beginPath(); ctx.moveTo(35, yPos); ctx.lineTo(w, yPos); ctx.stroke();
+              ctx.fillText(yValue, 32, yPos + 3);
+          }
+      }
+      ctx.beginPath(); ctx.strokeStyle = '#9ca3af'; ctx.lineWidth = 1; ctx.moveTo(35, 0); ctx.lineTo(35, h); ctx.stroke();
+      ctx.textAlign = 'left'; ctx.fillStyle = yColor; ctx.font = '12px sans-serif'; ctx.fillText(yLabel, 40, 15); 
+    };
+    
+    drawAxisAndGrid(ctxP, sP, 0, 'Paw (cmH2O)', '#f59e0b', false); 
+    drawLine(ctxP, history.current.paw, '#f59e0b', sP, 0, false); 
+    drawAxisAndGrid(ctxF, sF, sF, 'Flow (L/min)', '#10b981', true); 
+    drawLine(ctxF, history.current.flow, '#10b981', sF, -sF, true); 
+    ctxF.globalAlpha = 0.8;
+    drawLine(ctxF, history.current.flowR, '#ef4444', sF, -sF, true); 
+    ctxF.globalAlpha = 0.6; 
+    drawLine(ctxF, history.current.flowL, '#3b82f6', sF, -sF, true); 
+    ctxF.globalAlpha = 1.0;
+    drawAxisAndGrid(ctxV, sV, 0, 'Volume (ml)', '#3b82f6', false); 
+    drawLine(ctxV, history.current.vol, '#3b82f6', sV, 0, false); 
+  }, [updateAutoScales]);
+  
+  // --- Loop Drawing (Updated for Real-time) ---
+  const drawLoops = useCallback(() => {
+    const ctxPV = canvasRefPV.current?.getContext('2d');
+    const ctxFV = canvasRefFV.current?.getContext('2d');
+    if (!ctxPV || !ctxFV) return;
+
+    const w = ctxPV.canvas.width;
+    const h = ctxPV.canvas.height;
+    const paddingLeft = 40; const paddingRight = 10; const paddingBottom = 35; const paddingTop = 20; 
+    const innerW = w - paddingLeft - paddingRight;
+    const innerH = h - paddingTop - paddingBottom;
+    
+    const pMax = scalesRef.current.pMax;
+    const vMax = scalesRef.current.vMax;
+    const fMax = scalesRef.current.fMax;
+
+    const drawLoopGrid = (ctx, xMax, yMax, xLabel, yLabel, midZeroY = false) => {
+      ctx.clearRect(0, 0, w, h);
+      ctx.strokeStyle = '#374151'; ctx.fillStyle = '#f3f4f6'; ctx.font = '10px sans-serif';
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(paddingLeft, h - paddingBottom); ctx.lineTo(w - paddingRight, h - paddingBottom);
+      ctx.moveTo(paddingLeft, paddingTop); ctx.lineTo(paddingLeft, h - paddingBottom); ctx.stroke();
+      ctx.textAlign = 'center';
+      for (let i = 0; i <= 4; i++) {
+        const xVal = (xMax / 4) * i; const xPos = paddingLeft + (innerW / 4) * i;
+        ctx.beginPath(); ctx.moveTo(xPos, h - paddingBottom); ctx.lineTo(xPos, h - paddingBottom + 4); ctx.stroke();
+        ctx.fillText(xVal.toFixed(0), xPos, h - paddingBottom + 15);
+      }
+      ctx.fillStyle = '#f3f4f6'; ctx.textAlign = 'center'; ctx.font = 'bold 11px sans-serif';
+      ctx.fillText(xLabel, paddingLeft + innerW / 2, h - 5); 
+      ctx.textAlign = 'right'; ctx.font = '10px sans-serif'; ctx.fillStyle = '#9ca3af';
+      const steps = 4;
+      for(let i=0; i<=steps; i++) {
+          let val, y;
+          if(midZeroY) { val = yMax - (i * (yMax*2)/steps); y = paddingTop + (i * innerH/steps); } 
+          else { val = yMax - (i * yMax/steps); y = paddingTop + (i * innerH/steps); }
+          ctx.beginPath(); ctx.moveTo(paddingLeft-4, y); ctx.lineTo(paddingLeft, y); ctx.stroke();
+          ctx.fillText(val.toFixed(0), paddingLeft - 8, y + 3);
+      }
+      ctx.textAlign = 'left'; ctx.fillStyle = '#e5e7eb'; ctx.font = 'bold 11px sans-serif'; ctx.fillText(yLabel, 5, 12); 
+      if(midZeroY) {
+         const midY = paddingTop + innerH/2;
+         ctx.strokeStyle = '#4b5563'; ctx.beginPath(); ctx.moveTo(paddingLeft, midY); ctx.lineTo(w-paddingRight, midY); ctx.stroke();
+      }
+    };
+
+    const drawLoopLine = (ctx, data, color, xAccessor, yAccessor, xMax, yMax, midY = false) => {
+        if (data.length < 2) return;
+        ctx.beginPath();
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        data.forEach((point, i) => {
+          const xVal = point[xAccessor];
+          const yVal = point[yAccessor];
+          const x = paddingLeft + (xVal / xMax) * innerW;
+          let y;
+          if (midY) {
+              const midH = paddingTop + innerH/2;
+              y = midH - (yVal / yMax) * (innerH/2);
+          } else {
+              y = (h - paddingBottom) - (yVal / yMax) * innerH;
+          }
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+    };
+
+    // Draw P/V Loop
+    drawLoopGrid(ctxPV, pMax, vMax, 'Pressure (cmH2O)', 'Volume (ml)', false);
+    // Ghost (Last Breath)
+    ctxPV.globalAlpha = 0.3;
+    drawLoopLine(ctxPV, history.current.lastLoopPV, '#f59e0b', 'p', 'v', pMax, vMax, false);
+    // Current Breath (Real-time) - [Request 1 Solution]
+    ctxPV.globalAlpha = 1.0;
+    drawLoopLine(ctxPV, history.current.currentLoopPV, '#f59e0b', 'p', 'v', pMax, vMax, false);
+
+    // Draw F/V Loop
+    drawLoopGrid(ctxFV, vMax, fMax, 'Volume (ml)', 'Flow (L/min)', true);
+    // Ghost (Last Breath)
+    ctxFV.globalAlpha = 0.3;
+    drawLoopLine(ctxFV, history.current.lastLoopFV, '#10b981', 'v', 'f', vMax, fMax, true);
+    // Current Breath (Real-time) - [Request 1 Solution]
+    ctxFV.globalAlpha = 1.0;
+    drawLoopLine(ctxFV, history.current.currentLoopFV, '#10b981', 'v', 'f', vMax, fMax, true);
+
+  }, []);
+
+  // --- Main Loop ---
   useEffect(() => {
     let animationFrameId;
     const loop = () => {
       updatePhysics();
       drawWaveforms();
-      drawLoops();
+      drawLoops(); 
       animationFrameId = requestAnimationFrame(loop);
     };
     loop();
     return () => cancelAnimationFrame(animationFrameId);
   }, [updatePhysics, drawWaveforms, drawLoops]);
 
-  const handlePathologyChange = (e) => {
-    const newPathology = e.target.value;
-    const preset = PATHOLOGY_PRESETS[newPathology] || PATHOLOGY_PRESETS['NORMAL'];
-    setParams(p => ({
-      ...p,
-      pathology: newPathology,
-      resL: preset.resL,
-      compL: preset.compL,
-      resR: preset.resR,
-      compR: preset.compR,
-      shunt: preset.shunt,
-      deadspace: preset.deadspace,
-      frcOffset: preset.frcOffset,
-      lungCapacity: preset.lungCapacity
-    }));
-  };
+  // --- Handlers ---
+  // We use the new handlePathologyChange defined above
 
   const handleModeChange = (e) => {
     const newMode = e.target.value;
