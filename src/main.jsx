@@ -1,9 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import ReactDOM from 'react-dom/client';
 import { Play, Pause, Activity, Settings, HeartPulse, AlertCircle, TrendingUp, Filter, BarChart2, User, Clock, PauseCircle, StopCircle } from 'lucide-react';
-import { getDynamicCompliance } from './physics/compliance';
-import { getDynamicResistance } from './physics/resistance';
-import { PATHOLOGY_PRESETS as PATHOLOGY_PRESETS_MODULE } from './physics/pathologyPresets';
 
 // --- Physics Constants & Types ---
 const DT = 0.016; // Time step (seconds) approx 60fps
@@ -27,9 +24,90 @@ const lerp = (start, end, factor) => start + (end - start) * factor;
 // --- ADVANCED PHYSICS: DYNAMIC RESISTANCE (Rohrer's Equation & Airway Tethering) ---
 // อ้างอิงจาก PDF: "Resistance increases with increasing airflow" (Turbulence) 
 // และ "Resistance decreases on a hyperbolic curve as airway diameter... stretches" (Volume dependence)
+const getDynamicResistance = (baseR, currentFlow_Lps, currentVol_L, pathology) => {
+    // 1. Flow Dependence (Rohrer's equation component: K2 * Flow)
+    // Flow ยิ่งแรง แรงต้านยิ่งเยอะ (Turbulent)
+    let turbulenceFactor = 0.5; 
+    
+    // 2. Volume Dependence (Airway Tethering)
+    // Volume ยิ่งเยอะ ท่อลมยิ่งถูกดึงให้ถ่างออก -> R ลดลง
+    let volumeFactor = 2.0; 
+
+    if (pathology === 'COPD' || pathology === 'EMPHYSEMA') {
+       turbulenceFactor = 2.5; // ทางเดินหายใจตีบง่าย เกิด turbulence ง่ายกว่า
+       volumeFactor = 5.0;     // ผลกระทบของ Volume ต่อ R ชัดเจนกว่า (Dynamic compression สูงมากเมื่อ Vol ต่ำ)
+    }
+
+    const flowEffect = Math.abs(currentFlow_Lps) * turbulenceFactor;
+    // ใช้สูตร hyperbolic decay อย่างง่าย: R ลดลงเมื่อ Vol เพิ่ม
+    const volEffect = Math.min(baseR * 0.6, currentVol_L * volumeFactor);
+
+    let effectiveR = baseR + flowEffect - volEffect;
+    
+    // Safety clamp: ไม่ให้ R ต่ำกว่า 30% ของค่าตั้งต้น
+    return Math.max(baseR * 0.3, effectiveR);
+};
 
 // --- ADVANCED PHYSICS: NON-LINEAR COMPLIANCE & HYSTERESIS (Balloon Effect) ---
 // Logic: รับค่า Total Volume (รวม FRC/AirTrapping) เพื่อคำนวณความตึงตัว (Distension)
+const getDynamicCompliance = (currentTotalVol_L, baseC_ml, pathology, phase, lungCapacity_L) => {
+    const baseC_L = baseC_ml / 1000; // Convert base compliance to L/cmH2O
+    
+    // ตั้งค่า Thresholds จุดดัดโค้งของกราฟตามโรค
+    let lowerInflection_L = 0.1; 
+    // Upper inflection คือจุดที่ปอดเริ่มตึง (ใกล้ Capacity)
+    let upperInflection_L = lungCapacity_L * 0.75; // เริ่มตึงที่ 75% ของความจุ
+    let distensionFactor = 10;   
+
+    switch (pathology) {
+        case 'ARDS': 
+             // Baby Lung: เนื้อปอดดีเหลือน้อย ต้องใช้แรงเปิด (Lower inflection สูง) และตึงเร็ว
+             lowerInflection_L = 0.15; 
+             upperInflection_L = lungCapacity_L * 0.6;  
+             distensionFactor = 20; // ตึงเร็วมาก
+             break;
+        case 'FIBROSIS': 
+            // Restrictive: กราฟนอน ปอดแข็ง ขยายได้นิดเดียวก็ตึง
+            lowerInflection_L = 0.05;
+            upperInflection_L = lungCapacity_L * 0.5;
+            distensionFactor = 25;   
+            break;
+        case 'EMPHYSEMA':
+        case 'COPD': 
+            // Obstructive: High Compliance ช่วงแรก แต่ถ้า Air Trapping จน Volume สูง จะตึง (ตามข้อ 10)
+            lowerInflection_L = 0.0; // เป่าง่ายตั้งแต่เริ่ม
+            upperInflection_L = lungCapacity_L * 0.8; 
+            distensionFactor = 8;    
+            break;
+        default: // NORMAL
+            lowerInflection_L = 0.1;
+            upperInflection_L = lungCapacity_L * 0.85; 
+            break;
+    }
+
+    let effectiveC = baseC_L;
+
+    // --- HYSTERESIS LOGIC (Recruitment Force) ---
+    // ช่วงหายใจเข้า C จะต่ำกว่าหายใจออกเล็กน้อย (ต้องใช้แรงถ่าง)
+    if (phase === 'INS' || phase === 'HOLD_INS' || phase === 'REC') {
+        if (currentTotalVol_L < lowerInflection_L) {
+            const factor = 0.5 + (0.5 * (currentTotalVol_L / lowerInflection_L));
+            effectiveC = baseC_L * factor;
+        }
+    }
+
+    // --- BALLOON EFFECT (Overdistension) ---
+    // เมื่อปริมาตรเกิน Upper Inflection (ปอดตึง) Compliance จะลดลงฮวบ
+    if (currentTotalVol_L > upperInflection_L) {
+        const excessVol = currentTotalVol_L - upperInflection_L;
+        // ยิ่งเกินเยอะ ยิ่งแข็ง (Exponential decay)
+        const stiffness = Math.exp(-excessVol * distensionFactor); 
+        effectiveC = baseC_L * stiffness;
+    }
+
+    // ป้องกันค่า Compliance เป็น 0 หรือติดลบ (Minimum 2 ml/cmH2O)
+    return Math.max(0.002, effectiveC); 
+};
 
 // --- Pathology Presets (UPDATED with frcOffset & lungCapacity) ---
 // frcOffset: ปริมาตรลมที่ค้างอยู่เดิม (Hyperinflation/Air Trapping)
