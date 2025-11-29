@@ -210,594 +210,564 @@ function App() {
     }));
   };
 
-  const updatePhysics = useCallback(() => {
-    if (!isRunning) return;
+  const handleModeChange = (e) => {
+    const newMode = e.target.value;
+    setParams(p => ({
+        ...p,
+        mode: newMode,
+        inspiratoryTime: newMode === 'PSV' ? 0.3 : 1.0, 
+        spontaneousRR: (newMode === 'PSV' && p.spontaneousRR === 0) ? 12 : p.spontaneousRR
+    }));
+    resetSimState();
+  };
 
-    const s = simState.current;
-    const p = params;
-    const d = derivedParams;
-
-    s.time += DT;
-    if (s.phase !== 'HOLD_INS' && s.phase !== 'HOLD_EXP') {
-      s.cycleTime += DT;
+  const handleTiChange = (e) => {
+    const newTi = Number(e.target.value);
+    const cycleDuration = 60 / params.respiratoryRate;
+    const TiMax = cycleDuration * 0.95; 
+    if (newTi < TiMax) {
+      setParams(p => ({ ...p, inspiratoryTime: newTi }));
+    } else {
+      setParams(p => ({ ...p, inspiratoryTime: TiMax - 0.05 }));
     }
+  };
 
-    try {
-      const CL_dynamic = getDynamicCompliance(s.volL, p.compL, p.pathology, s.phase, p.lungCapacity);
-      const CR_dynamic = getDynamicCompliance(s.volR, p.compR, p.pathology, s.phase, p.lungCapacity);
-      const RL_dynamic = getDynamicResistance(p.resL, s.flowL, s.volL, p.pathology);
-      const RR_dynamic = getDynamicResistance(p.resR, s.flowR, s.volR, p.pathology);
+  const handleCustomParamChange = (key, value) => {
+    const numValue = Math.max(0, Number(value));
+    setParams(p => ({ ...p, [key]: numValue }));
+  };
+  
+  // Handler for Shunt/Dead Space (as floating point numbers)
+  const handleGasExchangeChange = (key, value) => {
+    const numValue = Math.max(0, Math.min(1.0, Number(value))); // Clamp between 0-1 (0-100%)
+    setParams(p => ({ ...p, [key]: numValue }));
+  };
+  
+  // Handler for FiO2 (as floating point number between 0.21 and 1.0)
+  const handleFiO2Change = (e) => {
+    const numValue = Math.max(0.21, Math.min(1.0, Number(e.target.value))); // Clamp between 0.21-1.0
+    setParams(p => ({ ...p, fiO2: numValue }));
+  };
 
-      const V_Absolute_L_Current = s.volL + s.volR;
-      const V_Relative_mL_Current = Math.max(0, (V_Absolute_L_Current * 1000) - ((p.peep * (p.compL + p.compR)) + (p.frcOffset * 1000)));
-
-      let triggerBreath = false;
-      if (s.cycleTime >= d.cycleDuration) {
-        triggerBreath = true;
-      }
-
-      if (triggerBreath && s.phase !== 'INS') {
-        const now = Date.now();
-        if (s.lastBreathTime > 0) {
-          const breathDurMs = now - s.lastBreathTime;
-          if (breathDurMs > 500) {
-            const instantRR = 60000 / breathDurMs;
-            const Vt_Final_mL = Math.max(0, s.volPeakCycle - ((s.volL + s.volR) * 1000));
-            const MV_val = (instantRR * Vt_Final_mL) / 1000;
-            const drivingP = Math.max(1, s.pPlatTemp - p.peep);
-            const cstat = Vt_Final_mL / drivingP;
-
-            const baseShunt = p.shunt;
-            const baseDeadspace = p.deadspace;
-            const PmeanEffect = Math.max(0, ((s.pawSum / Math.max(1, s.pawCount)) - 5) * 0.01);
-            const actualShunt = Math.max(0.01, baseShunt - PmeanEffect);
-            let estimatedSpO2 = 99 - (actualShunt * 100) * 1.5;
-            const fio2Effect = (p.fiO2 - 0.40) * 15;
-            estimatedSpO2 += fio2Effect;
-            estimatedSpO2 = Math.max(50, Math.min(100, estimatedSpO2));
-
-            const idealMV = 6.0;
-            const effectiveMV = (instantRR * Vt_Final_mL / 1000) * (1 - baseDeadspace);
-            let estimatedEtCO2 = 40 * (idealMV / Math.max(0.1, effectiveMV));
-            estimatedEtCO2 = Math.max(10, Math.min(100, estimatedEtCO2));
-
-            setMonitoredValues(m => ({
-              ...m,
-              TotalRR: Math.round(instantRR * 10) / 10,
-              MV: Math.round(MV_val * 100) / 100,
-              VtExp: Math.round(Vt_Final_mL),
-              Cstat: Math.round(cstat * 10) / 10,
-              Pplat: Math.round(s.pPlatTemp * 10) / 10,
-              Pmean: Math.round((s.pawSum / Math.max(1, s.pawCount)) * 10) / 10,
-              AutoPEEP: Math.round(Math.max(0, ((s.volL / CL_dynamic + s.volR / CR_dynamic) / 2) - p.peep) * 10) / 10,
-              SpO2: Math.round(estimatedSpO2),
-              EtCO2: Math.round(estimatedEtCO2)
-            }));
-          }
-        }
-        s.lastBreathTime = now;
-        s.phase = 'INS';
-        s.cycleTime = 0;
-        s.volPeakCycle = (s.volL + s.volR) * 1000;
-        s.pawSum = 0;
-        s.pawCount = 0;
-        
-        if (history.current.currentLoopPV.length > 10) {
-          history.current.lastLoopPV = [...history.current.currentLoopPV];
-          history.current.lastLoopFV = [...history.current.currentLoopFV];
-        }
-        history.current.currentLoopPV = [];
-        history.current.currentLoopFV = [];
-      }
-
-      const PelL = s.volL / CL_dynamic;
-      const PelR = s.volR / CR_dynamic;
-      const PalvL = PelL;
-      const PalvR = PelR;
-
-      let currentPaw = p.peep;
-      const RL = RL_dynamic * (s.phase === 'EXP' ? EXP_RESISTANCE_MULTIPLIER : 1);
-      const RR = RR_dynamic * (s.phase === 'EXP' ? EXP_RESISTANCE_MULTIPLIER : 1);
-
-      if (s.phase === 'INS') {
-        if (p.mode === 'VCV') {
-          if (V_Relative_mL_Current >= p.tidalVolume) {
-            s.phase = 'EXP';
-          }
-        } else if (p.mode === 'PCV') {
-          currentPaw = p.inspiratoryPressure + p.peep;
-          if (s.cycleTime >= d.inspDuration) {
-            s.phase = 'EXP';
-            s.pPlatTemp = (PelL + PelR) / 2 + p.peep;
-          }
-        }
-      } else {
-        s.phase = 'EXP';
-        currentPaw = p.peep;
-      }
-
-      s.flowL = (currentPaw - PalvL) / RL;
-      s.flowR = (currentPaw - PalvR) / RR;
-      s.flowTotal = s.flowL + s.flowR;
-      s.paw = currentPaw;
-      s.volL += s.flowL * DT;
-      s.volR += s.flowR * DT;
-
-      if (s.volL < 0) s.volL = 0;
-      if (s.volR < 0) s.volR = 0;
-
-      const V_Absolute_mL = (s.volL + s.volR) * 1000;
-      s.pawSum += s.paw;
-      s.pawCount += 1;
-
-      if (s.phase === 'INS') {
-        s.volPeakCycle = Math.max(s.volPeakCycle, V_Absolute_mL);
-      }
-
-      history.current.paw.push(s.paw);
-      history.current.flow.push(s.flowTotal * 60);
-      history.current.flowL.push(s.flowL * 60);
-      history.current.flowR.push(s.flowR * 60);
-      history.current.vol.push(V_Relative_mL_Current);
-
-      history.current.currentLoopPV.push({ p: s.paw, v: V_Relative_mL_Current });
-      history.current.currentLoopFV.push({ f: s.flowTotal * 60, v: V_Relative_mL_Current });
-
-      if (history.current.paw.length > MAX_HISTORY) {
-        history.current.paw.shift();
-        history.current.flow.shift();
-        history.current.flowL.shift();
-        history.current.flowR.shift();
-        history.current.vol.shift();
-      }
-
-      s.timeSinceLastBreath += DT;
-      s.patientTime += DT;
-    } catch (e) {
-      console.error('Physics error:', e);
+  const handlePatientDataChange = (key, value) => {
+    let numValue = value;
+    if (key === 'heightCm' || key === 'actualWeightKg') {
+        numValue = Math.max(0, Number(value));
     }
-  }, [isRunning, params, derivedParams]);
+    setParams(p => ({ ...p, [key]: numValue }));
+  };
+  
+  // --- New Derived Monitor Values for Loops ---
+  const drivingPressure = monitoredValues.Pplat - params.peep;
+  // Vt Difference: Target Vt - Exhaled Vt (Proxy for Volume Trapping in VCV)
+  const vtDifference = params.tidalVolume - monitoredValues.VtExp; 
 
-  const updateAutoScales = useCallback(() => {
-    const recentPaw = history.current.paw.slice(-PEAK_WINDOW);
-    const recentFlow = history.current.flow.slice(-PEAK_WINDOW);
-    const recentVol = history.current.vol.slice(-PEAK_WINDOW);
-
-    const maxP = Math.max(20, ...recentPaw);
-    const maxF = Math.max(15, ...recentFlow.map(Math.abs));
-    const maxV = Math.max(200, ...recentVol);
-
-    scalesRef.current.pMax = lerp(scalesRef.current.pMax, maxP * 1.2, 0.05);
-    scalesRef.current.fMax = lerp(scalesRef.current.fMax, maxF * 1.2, 0.05);
-    scalesRef.current.vMax = lerp(scalesRef.current.vMax, maxV * 1.2, 0.05);
-
-    const diffP = Math.abs(scalesRef.current.pMax - displayedScalesRef.current.pMax);
-    const diffF = Math.abs(scalesRef.current.fMax - displayedScalesRef.current.fMax);
-    const diffV = Math.abs(scalesRef.current.vMax - displayedScalesRef.current.vMax);
-
-    if (diffP > 1 || diffF > 2 || diffV > 10) {
-      setScales({
-        pMax: scalesRef.current.pMax,
-        fMax: scalesRef.current.fMax,
-        vMax: scalesRef.current.vMax
-      });
-      displayedScalesRef.current = { ...scalesRef.current };
-    }
-  }, []);
-
-  const drawWaveforms = useCallback(() => {
-    const ctxP = canvasRefP.current?.getContext('2d');
-    const ctxF = canvasRefF.current?.getContext('2d');
-    const ctxV = canvasRefV.current?.getContext('2d');
-    if (!ctxP || !ctxF || !ctxV) return;
-
-    updateAutoScales();
-
-    const w = ctxP.canvas.width;
-    const h = ctxP.canvas.height;
-
-    const drawLine = (ctx, data, color, yMax, midY = false) => {
-      ctx.beginPath();
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 2;
-      
-      data.forEach((val, i) => {
-        const x = 40 + ((i / MAX_HISTORY) * (w - 50));
-        let y;
-        if (midY) {
-          y = h / 2 - (val / yMax) * (h / 2 - 20);
-        } else {
-          y = h - 20 - (val / yMax) * (h - 40);
-        }
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      });
-      ctx.stroke();
-    };
-
-    ctxP.fillStyle = '#1f2937';
-    ctxP.fillRect(0, 0, w, h);
-    ctxP.fillStyle = '#f59e0b';
-    ctxP.font = 'bold 13px sans-serif';
-    ctxP.fillText('Paw (cmH2O)', 50, 22);
-    ctxP.font = '12px sans-serif';
-    ctxP.fillText('PEAK: ' + Math.max(...history.current.paw).toFixed(1), w - 120, 22);
-    drawLine(ctxP, history.current.paw, '#f59e0b', scales.pMax);
-
-    ctxF.fillStyle = '#1f2937';
-    ctxF.fillRect(0, 0, w, h);
-    ctxF.fillStyle = '#10b981';
-    ctxF.font = 'bold 13px sans-serif';
-    ctxF.fillText('Flow (L/min)', 50, 22);
-    ctxF.font = '12px sans-serif';
-    ctxF.fillText('SCALE: ' + scales.fMax.toFixed(1), w - 150, 22);
-    drawLine(ctxF, history.current.flow, '#10b981', scales.fMax, true);
-
-    ctxV.fillStyle = '#1f2937';
-    ctxV.fillRect(0, 0, w, h);
-    ctxV.fillStyle = '#3b82f6';
-    ctxV.font = 'bold 13px sans-serif';
-    ctxV.fillText('Volume (ml)', 50, 22);
-    ctxV.font = '12px sans-serif';
-    ctxV.fillText('Max: ' + Math.max(...history.current.vol).toFixed(0), w - 150, 22);
-    drawLine(ctxV, history.current.vol, '#3b82f6', scales.vMax);
-  }, [scales, updateAutoScales]);
-
-  const drawLoops = useCallback(() => {
-    const ctxPV = canvasRefPV.current?.getContext('2d');
-    const ctxFV = canvasRefFV.current?.getContext('2d');
-    if (!ctxPV || !ctxFV) return;
-
-    const w = ctxPV.canvas.width;
-    const h = ctxPV.canvas.height;
-
-    ctxPV.fillStyle = '#1f2937';
-    ctxPV.fillRect(0, 0, w, h);
-    ctxPV.strokeStyle = '#f59e0b';
-    ctxPV.lineWidth = 2;
-
-    const pMax = scales.pMax;
-    const vMax = scales.vMax;
-    const px = 40;
-    const py = 20;
-    const pw = w - 60;
-    const ph = h - 40;
-
-    ctxPV.globalAlpha = 0.2;
-    ctxPV.beginPath();
-    history.current.lastLoopPV.forEach((pt, i) => {
-      const x = px + (pt.p / pMax) * pw;
-      const y = py + ph - (pt.v / vMax) * ph;
-      if (i === 0) ctxPV.moveTo(x, y);
-      else ctxPV.lineTo(x, y);
-    });
-    ctxPV.stroke();
-
-    ctxPV.globalAlpha = 1.0;
-    ctxPV.beginPath();
-    history.current.currentLoopPV.forEach((pt, i) => {
-      const x = px + (pt.p / pMax) * pw;
-      const y = py + ph - (pt.v / vMax) * ph;
-      if (i === 0) ctxPV.moveTo(x, y);
-      else ctxPV.lineTo(x, y);
-    });
-    ctxPV.stroke();
-
-    ctxFV.fillStyle = '#1f2937';
-    ctxFV.fillRect(0, 0, w, h);
-    ctxFV.strokeStyle = '#10b981';
-    ctxFV.lineWidth = 2;
-
-    const fMax = scales.fMax;
-
-    ctxFV.globalAlpha = 0.2;
-    ctxFV.beginPath();
-    history.current.lastLoopFV.forEach((pt, i) => {
-      const x = px + (pt.v / vMax) * pw;
-      const y = py + ph / 2 - (pt.f / fMax) * (ph / 2);
-      if (i === 0) ctxFV.moveTo(x, y);
-      else ctxFV.lineTo(x, y);
-    });
-    ctxFV.stroke();
-
-    ctxFV.globalAlpha = 1.0;
-    ctxFV.beginPath();
-    history.current.currentLoopFV.forEach((pt, i) => {
-      const x = px + (pt.v / vMax) * pw;
-      const y = py + ph / 2 - (pt.f / fMax) * (ph / 2);
-      if (i === 0) ctxFV.moveTo(x, y);
-      else ctxFV.lineTo(x, y);
-    });
-    ctxFV.stroke();
-  }, [scales]);
-
-  useEffect(() => {
-    let animationFrameId;
-    const loop = () => {
-      updatePhysics();
-      drawWaveforms();
-      drawLoops();
-      animationFrameId = requestAnimationFrame(loop);
-    };
-    loop();
-    return () => cancelAnimationFrame(animationFrameId);
-  }, [updatePhysics, drawWaveforms, drawLoops]);
 
   return (
-    <div className="min-h-screen bg-white text-gray-900 p-3">
-      <div className="w-full">
-        {/* HEADER */}
-        <header className="flex justify-between items-center mb-4 pb-3 border-b border-gray-200">
-          <div className="flex items-center gap-3">
-            <Activity className="h-6 w-6 text-blue-600" />
+    <div className="min-h-screen bg-gray-100 text-gray-900 font-sans p-4 md:p-8">
+      <div className="max-w-7xl mx-auto">
+        
+        {/* Header */}
+        <header className="flex justify-between items-center mb-8 border-b border-gray-300 pb-4">
+          <div className="flex items-center space-x-3">
+            <Activity className="text-blue-600 h-8 w-8" />
             <div>
-              <h1 className="text-2xl font-bold">VentSim <span className="text-blue-600">Dual-Lung</span></h1>
-              <p className="text-xs text-gray-500">VCV/PCV/PSV Mode Simulator</p>
+              <h1 className="text-2xl font-bold tracking-tight">VentSim <span className="text-blue-500">Dual-Lung</span></h1>
+              <p className="text-xs text-gray-500">VC, PC, PS Mode Simulator with Dual-Lung Pathology</p>
             </div>
           </div>
-
-          <button
-            onClick={() => setIsRunning(!isRunning)}
-            className={`flex items-center gap-2 px-5 py-2 rounded-full font-bold transition text-sm ${
-              isRunning 
-                ? 'bg-red-600 hover:bg-red-700 text-white shadow-lg' 
-                : 'bg-green-600 hover:bg-green-700 text-white shadow-lg'
-            }`}
-          >
-            {isRunning ? <Pause size={16} /> : <Play size={16} />}
-            {isRunning ? 'STOP' : 'START'}
-          </button>
+          <div className="flex items-center space-x-4">
+              {/* HOLD STATUS INDICATORS */}
+              {holdStatus && (
+                  <div className="px-3 py-1 rounded bg-yellow-100 border border-yellow-400 text-yellow-800 text-xs font-bold animate-pulse">
+                      {holdStatus === 'INSP_HOLD' ? 'INSPIRATORY HOLD ACTIVE' : 'EXPIRATORY HOLD ACTIVE'}
+                  </div>
+              )}
+              <button 
+                onClick={() => setIsRunning(!isRunning)}
+                className={`flex items-center px-4 py-2 rounded-full font-semibold transition ${
+                  isRunning ? 'bg-red-500 hover:bg-red-600 text-white' : 'bg-blue-600 hover:bg-blue-700 text-white'
+                }`}
+              >
+                {isRunning ? <><Pause className="w-4 h-4 mr-2"/> STOP</> : <><Play className="w-4 h-4 mr-2"/> START</>}
+              </button>
+          </div>
         </header>
 
-        {/* DESKTOP LAYOUT: Left (Waveforms/Loops/Monitor) + Right (Controls) */}
-        <div className="grid grid-cols-1 xl:grid-cols-5 gap-3">
-          {/* LEFT SECTION: 3 cols - Waveforms + Loops + Monitor */}
-          <div className="xl:col-span-3 space-y-3">
-            {/* WAVEFORMS */}
-            <div className="bg-white rounded-lg p-3 border border-gray-200 shadow-sm">
-              <h2 className="flex items-center gap-2 font-bold mb-2 text-sm">
-                <TrendingUp size={16} className="text-blue-600" /> Waveforms
-              </h2>
-              
-              <div className="space-y-1">
-                <div className="bg-gray-900 rounded border border-gray-300 p-1.5">
-                  <canvas ref={canvasRefP} width={900} height={90} className="w-full" />
-                </div>
-                <div className="bg-gray-900 rounded border border-gray-300 p-1.5">
-                  <canvas ref={canvasRefF} width={900} height={90} className="w-full" />
-                </div>
-                <div className="bg-gray-900 rounded border border-gray-300 p-1.5">
-                  <canvas ref={canvasRefV} width={900} height={90} className="w-full" />
-                </div>
-              </div>
-            </div>
-
-            {/* LOOPS */}
-            <div className="grid grid-cols-2 gap-3">
-              <div className="bg-white rounded-lg p-3 border border-gray-200 shadow-sm">
-                <h3 className="text-xs font-bold mb-1.5 text-blue-600">P-V Loop</h3>
-                <canvas ref={canvasRefPV} width={320} height={180} className="w-full bg-gray-900 rounded" />
-              </div>
-              <div className="bg-white rounded-lg p-3 border border-gray-200 shadow-sm">
-                <h3 className="text-xs font-bold mb-1.5 text-green-600">F-V Loop</h3>
-                <canvas ref={canvasRefFV} width={320} height={180} className="w-full bg-gray-900 rounded" />
-              </div>
-            </div>
-
-            {/* MONITORED VALUES - 6 boxes per row + 3 per row */}
-            <div className="bg-white rounded-lg p-3 border border-gray-200 shadow-sm">
-              <h3 className="flex items-center gap-2 font-bold mb-2 text-sm">
-                <BarChart2 size={16} className="text-blue-600" /> Monitored Values
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+          
+          {/* LEFT COLUMN: Waveforms & Monitoring */}
+          <div className="lg:col-span-8 space-y-6">
+            
+            {/* Waveforms Panel */}
+            <div className="bg-white rounded-xl p-4 shadow-lg border border-gray-300">
+              <h3 className="text-gray-500 text-sm font-semibold mb-2 flex items-center">
+                <Activity className="w-4 h-4 mr-2"/> Real-time Waveforms
               </h3>
+              
+              <div className="space-y-4">
+                {/* Pressure */}
+                <div className="relative h-32 bg-gray-800 rounded border border-gray-400 overflow-hidden">
+                    <span className="absolute top-2 right-2 text-yellow-500 text-xs font-bold z-10">
+                        PEAK: {scales.pMax.toFixed(0)} cmH2O 
+                    </span>
+                  <canvas ref={canvasRefP} width={800} height={128} className="w-full h-full" />
+                </div>
 
-              <div className="grid grid-cols-6 gap-2">
-                <div className="bg-red-50 p-2.5 rounded border border-red-100">
-                  <p className="text-xs text-gray-600">P-Plateau</p>
-                  <p className="text-lg font-bold text-red-600">{monitoredValues.Pplat}</p>
-                  <p className="text-xs text-gray-500">cmH2O</p>
+                {/* Flow */}
+                <div className="relative h-32 bg-gray-800 rounded border border-gray-400 overflow-hidden">
+                    <span className="absolute top-2 right-2 text-emerald-400 text-xs font-bold z-10">
+                        SCALE: ±{scales.fMax.toFixed(0)} L/min 
+                    </span>
+                  <div className="absolute top-2 left-1/2 transform -translate-x-1/2 text-[10px] flex justify-center space-x-3 z-10 text-white mt-1">
+                    <span className="text-blue-500">■ Left Lung</span>
+                    <span className="text-red-500">■ Right Lung</span>
+                    <span className="text-emerald-400">■ Total</span>
+                  </div>
+                  <canvas ref={canvasRefF} width={800} height={128} className="w-full h-full" />
                 </div>
-                <div className="bg-yellow-50 p-2.5 rounded border border-yellow-100">
-                  <p className="text-xs text-gray-600">Paw-mean</p>
-                  <p className="text-lg font-bold text-yellow-600">{monitoredValues.Pmean}</p>
-                  <p className="text-xs text-gray-500">cmH2O</p>
+
+                {/* Volume */}
+                <div className="relative h-32 bg-gray-800 rounded border border-gray-400 overflow-hidden">
+                    <div className="absolute top-1 right-2 text-blue-500 text-xs font-bold z-10 text-right leading-tight">
+                        <span className="block">Max (Rel): {monitoredValues.VPeakRel.toFixed(0)} ml</span>
+                        <span className="text-emerald-400 block">Vt: {monitoredValues.VtExp.toFixed(0)} ml</span> 
+                        <span className="block text-indigo-400">Max (Abs): {monitoredValues.VPeakAbs.toFixed(0)} ml</span>
+                    </div>
+                  <canvas ref={canvasRefV} width={800} height={128} className="w-full h-full" />
                 </div>
-                <div className="bg-blue-50 p-2.5 rounded border border-blue-100">
-                  <p className="text-xs text-gray-600">RR Total</p>
-                  <p className="text-lg font-bold text-blue-600">{monitoredValues.TotalRR}</p>
-                  <p className="text-xs text-gray-500">/min</p>
-                </div>
-                <div className="bg-green-50 p-2.5 rounded border border-green-100">
-                  <p className="text-xs text-gray-600">MV (Exp.)</p>
-                  <p className="text-lg font-bold text-green-600">{monitoredValues.MV.toFixed(1)}</p>
-                  <p className="text-xs text-gray-500">L/min</p>
-                </div>
-                <div className="bg-cyan-50 p-2.5 rounded border border-cyan-100">
-                  <p className="text-xs text-gray-600">Vt (Exp)</p>
-                  <p className="text-lg font-bold text-cyan-600">{monitoredValues.VtExp}</p>
-                  <p className="text-xs text-gray-500">ml</p>
-                </div>
-                <div className="bg-purple-50 p-2.5 rounded border border-purple-100">
-                  <p className="text-xs text-gray-600">Cstat</p>
-                  <p className="text-lg font-bold text-purple-600">{monitoredValues.Cstat}</p>
-                  <p className="text-xs text-gray-500">ml/cmH2O</p>
+              </div>
+            </div>
+            
+            {/* Monitoring and Loops Panel */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              
+              {/* Monitored Parameters */}
+              <div className="bg-white rounded-xl p-4 shadow-lg border border-gray-300 md:col-span-1">
+                <h3 className="text-gray-500 text-sm font-semibold mb-3 flex items-center">
+                  <BarChart2 className="w-4 h-4 mr-2"/> Monitored Values
+                </h3>
+                <div className="space-y-2">
+                    <div className="flex justify-between items-center text-sm border-b border-gray-100 pb-1">
+                        <span className="text-gray-600">P-Plateau</span>
+                        <span className="font-bold text-lg text-red-600 text-right">{monitoredValues.Pplat.toFixed(1)} <span className="text-sm">cmH2O</span></span>
+                    </div>
+                    <div className="flex justify-between items-center text-sm border-b border-gray-100 pb-1">
+                        <span className="text-gray-600">Paw-mean</span>
+                        <span className="font-bold text-lg text-blue-600 text-right">{monitoredValues.Pmean.toFixed(1)} <span className="text-sm">cmH2O</span></span>
+                    </div>
+                    <div className="flex justify-between items-center text-sm border-b border-gray-100 pb-1">
+                        <span className="text-gray-600">RR Total</span>
+                        <span className="font-bold text-lg text-blue-600 text-right">{monitoredValues.TotalRR.toFixed(1)} <span className="text-sm">/min</span></span>
+                    </div>
+                    <div className="flex justify-between items-center text-sm border-b border-gray-100 pb-1">
+                        <span className="text-gray-600">MV (Exp.)</span>
+                        <span className="font-bold text-lg text-emerald-600 text-right">{monitoredValues.MV.toFixed(2)} <span className="text-sm">L/min</span></span>
+                    </div>
+                    <div className="flex justify-between items-center text-sm border-b border-gray-100 pb-1">
+                        <span className="text-gray-600">Cstat</span>
+                        <span className="font-bold text-lg text-purple-600 text-right">{monitoredValues.Cstat.toFixed(1)} <span className="text-sm">ml/cmH2O</span></span>
+                    </div>
+                    <div className="flex justify-between items-center text-sm border-b border-gray-100 pb-1">
+                        <span className="text-gray-600">PEEPi</span>
+                        <span className="font-bold text-lg text-yellow-600 text-right">{monitoredValues.AutoPEEP.toFixed(1)} <span className="text-sm">cmH2O</span></span>
+                    </div>
+                    {/* [MODIFIED] Added SpO2 and EtCO2 */}
+                    <div className="flex justify-between items-center text-sm border-b border-gray-100 pb-1">
+                        <span className="text-gray-600">SpO2 (Est.)</span>
+                        <span className={`font-bold text-lg text-right ${monitoredValues.SpO2 < 90 ? 'text-red-600 animate-pulse' : 'text-blue-500'}`}>{monitoredValues.SpO2} <span className="text-sm">%</span></span>
+                    </div>
+                      <div className="flex justify-between items-center text-sm">
+                        <span className="text-gray-600">EtCO2 (Est.)</span>
+                        <span className={`font-bold text-lg text-right ${monitoredValues.EtCO2 > 45 ? 'text-red-600' : 'text-emerald-500'}`}>{monitoredValues.EtCO2} <span className="text-sm">mmHg</span></span>
+                    </div>
                 </div>
               </div>
 
-              {/* Second row - 3 boxes */}
-              <div className="grid grid-cols-3 gap-2 mt-2">
-                <div className="bg-orange-50 p-2.5 rounded border border-orange-100">
-                  <p className="text-xs text-gray-600">PEEPI</p>
-                  <p className="text-lg font-bold text-orange-600">{monitoredValues.AutoPEEP}</p>
-                  <p className="text-xs text-gray-500">cmH2O</p>
-                </div>
-                <div className={`p-2.5 rounded border ${monitoredValues.SpO2 < 90 ? 'bg-red-50 border-red-100' : 'bg-blue-50 border-blue-100'}`}>
-                  <p className="text-xs text-gray-600">SpO2 (Est.)</p>
-                  <p className={`text-lg font-bold ${monitoredValues.SpO2 < 90 ? 'text-red-600' : 'text-blue-600'}`}>{monitoredValues.SpO2}</p>
-                  <p className="text-xs text-gray-500">%</p>
-                </div>
-                <div className="bg-pink-50 p-2.5 rounded border border-pink-100">
-                  <p className="text-xs text-gray-600">EtCO2 (Est.)</p>
-                  <p className="text-lg font-bold text-pink-600">{monitoredValues.EtCO2}</p>
-                  <p className="text-xs text-gray-500">mmHg</p>
-                </div>
+              {/* P/V Loop (Card 2) - UPDATED MONITOR SIZE and BG */}
+              <div className="md:col-span-1 relative rounded-xl border border-gray-400 bg-gray-800 p-2 shadow-lg">
+                  <canvas ref={canvasRefPV} width={300} height={200} className="w-full h-auto bg-gray-800" />
+                  {/* NEW Monitor Area for P/V (Changed bg-gray-900/50 to bg-gray-900) */}
+                  <div className="absolute bottom-1 left-2 right-2 rounded-b bg-gray-900 p-1 text-xs text-white">
+                      <div className="flex justify-between font-bold">
+                          <span className="text-yellow-500">DRIVING P:</span>
+                          {/* Adjusted text-xl to text-2xl and text-sm to text-base */}
+                          <span className="text-2xl leading-none text-red-500">{drivingPressure.toFixed(1)} <span className="text-base">cmH2O</span></span>
+                      </div>
+                      {/* Adjusted text-[10px] to text-xs */}
+                      <div className="flex justify-between pt-1 text-xs">
+                          <span>Plat: {monitoredValues.Pplat.toFixed(1)}</span>
+                          <span className="text-purple-400">Cstat: {monitoredValues.Cstat.toFixed(1)} ml/cmH2O</span>
+                      </div>
+                  </div>
+              </div>
+              
+              {/* F/V Loop (Card 3) - UPDATED MONITOR SIZE and BG */}
+              <div className="md:col-span-1 relative rounded-xl border border-gray-400 bg-gray-800 p-2 shadow-lg">
+                  <canvas ref={canvasRefFV} width={300} height={200} className="w-full h-auto bg-gray-800" />
+                  {/* NEW Monitor Area for F/V (Changed bg-gray-900/50 to bg-gray-900) */}
+                  <div className="absolute bottom-1 left-2 right-2 rounded-b bg-gray-900 p-1 text-xs text-white">
+                      <div className="flex justify-between font-bold">
+                          <span className="text-emerald-400">PEEPi:</span>
+                          {/* Adjusted text-xl to text-2xl and text-sm to text-base */}
+                          <span className="text-2xl leading-none text-yellow-500">{monitoredValues.AutoPEEP.toFixed(1)} <span className="text-base">cmH2O</span></span>
+                      </div>
+                       {/* Adjusted text-[10px] to text-xs */}
+                       <div className="flex justify-between pt-1 text-xs">
+                           <span className="text-red-400">{params.mode === 'VCV' ? `Vt Diff: ${vtDifference.toFixed(0)} ml` : `VTe: ${monitoredValues.VtExp.toFixed(0)} ml`}</span>
+                           <span className="text-blue-400">Flow Peak: {scales.fMax.toFixed(0)} L/min</span>
+                      </div>
+                  </div>
+              </div>
+            </div>
+
+
+            {/* Patient Mechanics & Pathology Presets */}
+            <div className="bg-white rounded-xl p-6 shadow-lg border border-gray-300">
+              <div className="flex items-center mb-4 text-purple-600">
+                <HeartPulse className="w-5 h-5 mr-2"/>
+                <h2 className="font-bold">Patient Mechanics & Pathology Presets</h2>
+              </div>
+
+              <div className="space-y-4">
+                 {/* Patient Data Inputs */}
+                 <div className="bg-gray-100 p-3 rounded border border-gray-300">
+                     <h4 className="text-sm font-semibold mb-2 flex items-center"><User className="w-4 h-4 mr-1"/> Patient Profile</h4>
+                     <div className="grid grid-cols-4 gap-3 text-sm">
+                        <div>
+                            <label className="text-xs text-gray-500 block mb-1">Gender</label>
+                            <select value={params.gender} onChange={(e) => handlePatientDataChange('gender', e.target.value)} className="w-full bg-white border border-gray-300 rounded px-2 py-1">
+                                <option value="M">Male</option><option value="F">Female</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label className="text-xs text-gray-500 block mb-1">Height (cm)</label>
+                            <input type="number" min="100" max="250" value={params.heightCm} onChange={(e) => handlePatientDataChange('heightCm', e.target.value)} className="w-full bg-white border border-gray-300 rounded px-2 py-1"/>
+                        </div>
+                        <div>
+                            <label className="text-xs text-gray-500 block mb-1">Actual Weight (kg)</label>
+                            <input type="number" min="20" max="200" value={params.actualWeightKg} onChange={(e) => handlePatientDataChange('actualWeightKg', e.target.value)} className="w-full bg-white border border-gray-300 rounded px-2 py-1"/>
+                        </div>
+                        <div>
+                            <label className="text-xs text-gray-500 block mb-1">Vt Weight Mode</label>
+                            <select value={params.weightMode} onChange={(e) => handlePatientDataChange('weightMode', e.target.value)} className="w-full bg-white border border-gray-300 rounded px-2 py-1">
+                                <option value="PBW">PBW ({derivedParams.PBW} kg)</option><option value="Actual">Actual ({params.actualWeightKg} kg)</option>
+                            </select>
+                        </div>
+                        <div className="col-span-4 text-xs text-gray-600 mt-1">
+                            <span className="font-semibold">Safe Vt Range (4-8 ml/kg PBW):</span> 
+                            <span className={derivedParams.isVtSafe ? 'text-emerald-600 font-bold' : 'text-red-600 font-bold'}> {derivedParams.safeVtRange}</span>
+                        </div>
+                     </div>
+                 </div>
+
+                 {/* Spontaneous RR Slider with Pmus Display */}
+                 <div className="bg-purple-50 p-3 rounded border border-purple-100">
+                    <div className="flex justify-between text-sm mb-1">
+                        <span className="font-bold text-purple-800 flex items-center"><HeartPulse className="w-4 h-4 mr-1"/> Spontaneous RR (Patient Effort)</span>
+                        <span className="font-mono text-purple-800 font-bold">{params.spontaneousRR} bpm</span>
+                    </div>
+                    <input type="range" min="0" max="40" step="1" value={params.spontaneousRR} onChange={(e) => setParams(p => ({...p, spontaneousRR: Number(e.target.value)}))} className="w-full accent-purple-600"/>
+                    <div className="flex justify-between items-center mt-1">
+                         <p className="text-xs text-purple-600">Set &#62; 0 to activate Pmus (Patient Effort) for PSV Trigger.</p>
+                         {params.spontaneousRR > 0 && (
+                             <div className="text-right">
+                                 <span className="text-xs font-bold block text-purple-700">Est. Pmus: {derivedParams.pmusMagnitude.toFixed(1)} cmH2O</span>
+                                 <span className={`text-[10px] font-semibold ${derivedParams.pmusColor}`}>{derivedParams.pmusStatus}</span>
+                             </div>
+                         )}
+                    </div>
+                     {/* [NEW UI] Sync Mode Selector */}
+                    {params.spontaneousRR > 0 && (
+                        <div className="mt-2 border-t border-purple-200 pt-2">
+                            <label className="text-xs text-purple-600 block mb-1 font-semibold">Sync Mode</label>
+                            <div className="flex space-x-4 text-sm">
+                                <label className="flex items-center">
+                                    <input type="radio" name="syncMode" value="FIGHTING" checked={params.pmusSyncMode === 'FIGHTING'} onChange={(e) => setParams(p => ({...p, pmusSyncMode: e.target.value}))} className="form-radio h-4 w-4 text-purple-600 border-gray-300"/>
+                                    <span className="ml-1 text-purple-800">Fighting (Asynchrony)</span>
+                                </label>
+                                <label className="flex items-center">
+                                    <input type="radio" name="syncMode" value="AUTO_SYNC" checked={params.pmusSyncMode === 'AUTO_SYNC'} onChange={(e) => setParams(p => ({...p, pmusSyncMode: e.target.value}))} className="form-radio h-4 w-4 text-purple-600 border-gray-300"/>
+                                    <span className="ml-1 text-purple-800">Auto Sync (1-2 min)</span>
+                                </label>
+                            </div>
+                            <p className="text-[10px] text-gray-500 mt-1">"Fighting" จะแสดง Patient Asynchrony ชัดเจน (เช่น Reverse Triggering, Flow Fighting)</p>
+                        </div>
+                    )}
+                 </div>
+
+                 {/* Pathology Preset Selector */}
+                 <div className="flex items-center space-x-4 bg-gray-100 p-3 rounded border border-gray-300">
+                     <Filter className="w-5 h-5 text-purple-500 flex-shrink-0" />
+                     <div className="flex-grow">
+                        <label htmlFor="pathologySelect" className="text-sm font-semibold block mb-1">Select Pathology Preset</label>
+                        {/* NOTE: handlePathologyChange is used here */}
+                        <select id="pathologySelect" value={params.pathology} onChange={handlePathologyChange} className="w-full bg-white border border-gray-300 rounded px-3 py-1 text-sm text-gray-900 appearance-none">
+                          {Object.entries(PATHOLOGY_PRESETS).map(([key, preset]) => (
+                            <option key={key} value={key}>{preset.name}</option>
+                          ))}
+                        </select>
+                     </div>
+                 </div>
+                 
+                 {/* Custom R/C inputs */}
+                 <div className="grid grid-cols-2 gap-4">
+                    <div className="bg-gray-50 p-3 rounded border border-gray-200">
+                        <h4 className="text-sm font-bold text-blue-600 mb-2">Left Lung</h4>
+                        <div className="grid grid-cols-2 gap-4">
+                            <div>
+                                <label className="text-xs text-gray-500 block">Compliance (ml/cmH2O)</label>
+                                <input type="number" min="1" className={`w-full bg-white border rounded px-2 py-1 text-sm text-gray-900 ${params.pathology !== 'CUSTOM' ? 'bg-gray-100 border-gray-300' : 'border-blue-300'}`} value={params.compL} onChange={(e) => handleCustomParamChange('compL', e.target.value)} disabled={params.pathology !== 'CUSTOM'} />
+                            </div>
+                            <div>
+                                <label className="text-xs text-gray-500 block">Resistance (cmH2O/(L/s))</label>
+                                <input type="number" min="1" className={`w-full bg-white border rounded px-2 py-1 text-sm text-gray-900 ${params.pathology !== 'CUSTOM' ? 'bg-gray-100 border-gray-300' : 'border-red-300'}`} value={params.resL} onChange={(e) => handleCustomParamChange('resL', e.target.value)} disabled={params.pathology !== 'CUSTOM'} />
+                            </div>
+                        </div>
+                    </div>
+                    <div className="bg-gray-50 p-3 rounded border border-gray-200">
+                        <h4 className="text-sm font-bold text-red-600 mb-2">Right Lung</h4>
+                         <div className="grid grid-cols-2 gap-4">
+                            <div>
+                                <label className="text-xs text-gray-500 block">Compliance (ml/cmH2O)</label>
+                                <input type="number" min="1" className={`w-full bg-white border rounded px-2 py-1 text-sm text-gray-900 ${params.pathology !== 'CUSTOM' ? 'bg-gray-100 border-gray-300' : 'border-red-300'}`} value={params.compR} onChange={(e) => handleCustomParamChange('compR', e.target.value)} disabled={params.pathology !== 'CUSTOM'} />
+                            </div>
+                            <div>
+                                <label className="text-xs text-gray-500 block">Resistance (cmH2O/(L/s))</label>
+                                <input type="number" min="1" className={`w-full bg-white border rounded px-2 py-1 text-sm text-gray-900 ${params.pathology !== 'CUSTOM' ? 'bg-gray-100 border-gray-300' : 'border-red-300'}`} value={params.resR} onChange={(e) => handleCustomParamChange('resR', e.target.value)} disabled={params.pathology !== 'CUSTOM'} />
+                            </div>
+                        </div>
+                    </div>
+                 </div>
+                 
+                 {/* [NEW UI STEP 4] Shunt & Deadspace Sliders */}
+                 <div className="bg-gray-50 p-3 rounded border border-gray-200 mt-4">
+                     <h4 className="text-sm font-bold text-gray-700 mb-2">Gas Exchange Parameters</h4>
+                     
+                     {/* Shunt Slider */}
+                     <div className="mb-3">
+                         <div className="flex justify-between text-xs mb-1">
+                             <span>Intrapulmonary Shunt (SpO2 effect)</span>
+                             <span className={`font-bold ${params.shunt > 0.15 ? 'text-red-600' : 'text-blue-600'}`}>
+                                 {(params.shunt * 100).toFixed(0)}%
+                             </span>
+                         </div>
+                         <input 
+                             type="range" min="0" max="0.6" step="0.01" 
+                             value={params.shunt} 
+                             onChange={(e) => handleGasExchangeChange('shunt', e.target.value)} 
+                             className="w-full accent-blue-600"
+                         />
+                         <p className="text-[10px] text-gray-500">Higher Shunt = Lower SpO2 (e.g., ARDS, Pneumonia)</p>
+                     </div>
+
+                     {/* Dead Space Slider */}
+                     <div>
+                         <div className="flex justify-between text-xs mb-1">
+                             <span>Dead Space Fraction (EtCO2 effect)</span>
+                             <span className={`font-bold ${params.deadspace > 0.3 ? 'text-red-600' : 'text-purple-600'}`}>
+                                 {(params.deadspace * 100).toFixed(0)}%
+                             </span>
+                         </div>
+                         <input 
+                             type="range" min="0.1" max="0.8" step="0.01" 
+                             value={params.deadspace} 
+                             onChange={(e) => handleGasExchangeChange('deadspace', e.target.value)} 
+                             className="w-full accent-purple-600"
+                         />
+                         <p className="text-[10px] text-gray-500">Higher Dead Space = Higher EtCO2 (e.g., COPD, PE)</p>
+                     </div>
+                 </div>
+
+
+                 <p className="text-xs text-gray-500 mt-2"><span className="font-semibold text-purple-600">Note:</span> {PATHOLOGY_PRESETS[params.pathology].note}</p>
               </div>
             </div>
           </div>
 
-          {/* RIGHT SECTION: 2 cols - Controls */}
-          <div className="xl:col-span-2 space-y-3">
-            {/* VENTILATOR SETTINGS */}
-            <div className="bg-white rounded-lg p-3 border border-gray-200 shadow-sm">
-              <h3 className="flex items-center gap-2 font-bold mb-2 text-sm">
-                <Settings size={16} className="text-blue-600" /> Settings
-              </h3>
-
-              <div className="space-y-2 text-xs">
+          {/* RIGHT COLUMN: Controls */}
+          <div className="lg:col-span-4 space-y-6">
+            
+            {/* Ventilator Settings */}
+            <div className="bg-white rounded-xl p-6 border border-gray-300">
+              <div className="flex items-center mb-4 text-blue-600">
+                <Settings className="w-5 h-5 mr-2"/>
+                <h2 className="font-bold">Ventilator Settings</h2>
+              </div>
+              
+              <div className="space-y-5">
+                {/* Mode Selector */}
                 <div>
-                  <label className="font-bold text-gray-700 block mb-0.5">Mode</label>
-                  <select 
-                    value={params.mode}
-                    onChange={(e) => setParams(p => ({ ...p, mode: e.target.value }))}
-                    className="w-full bg-white border border-gray-300 rounded px-2 py-1 text-xs text-gray-900"
-                  >
-                    <option>VCV</option>
-                    <option>PCV</option>
-                    <option>PSV</option>
-                  </select>
+                   <label className="text-sm font-semibold mb-2 block">Ventilation Mode</label>
+                   <div className="flex justify-between">
+                       {['VCV', 'PCV', 'PSV'].map(mode => (
+                           <label key={mode} className="flex items-center text-sm">
+                               <input type="radio" name="mode" value={mode} checked={params.mode === mode} onChange={handleModeChange} className="form-radio h-4 w-4 text-blue-600 border-gray-300"/>
+                               <span className="ml-2 font-bold">{mode}</span>
+                           </label>
+                       ))}
+                   </div>
                 </div>
 
-                <div>
-                  <label className="font-bold text-gray-700 flex justify-between mb-0.5">
-                    <span>Pinsp</span>
-                    <span className="text-red-600">{params.inspiratoryPressure}</span>
-                  </label>
-                  <input 
-                    type="range"
-                    min="5" max="30"
-                    value={params.inspiratoryPressure}
-                    onChange={(e) => setParams(p => ({ ...p, inspiratoryPressure: Number(e.target.value) }))}
-                    className="w-full h-1.5 bg-gray-300 rounded"
-                  />
+                {/* VCV ONLY: Tidal Volume */}
+                {params.mode === 'VCV' && (
+                    <div>
+                      <div className="flex justify-between text-sm mb-1"><span>Tidal Volume (Vt)</span><span className="font-mono text-blue-600">{params.tidalVolume} ml</span></div>
+                      <input type="range" min="200" max="800" step="10" value={params.tidalVolume} onChange={(e) => setParams(p => ({...p, tidalVolume: Number(e.target.value)}))} className="w-full accent-blue-600"/>
+                      <p className={`text-xs mt-1 ${derivedParams.isVtSafe ? 'text-emerald-600 font-bold' : 'text-red-600 font-bold'}`}>Vt/PBW: {(params.tidalVolume / derivedParams.PBW).toFixed(1)} ml/kg</p>
+                    </div>
+                )}
+
+                {/* PCV ONLY: Inspiratory Pressure */}
+                {params.mode === 'PCV' && (
+                    <div>
+                      <div className="flex justify-between text-sm mb-1"><span>Inspiratory Pressure (Pinsp)</span><span className="font-mono text-red-600">{params.inspiratoryPressure} cmH2O</span></div>
+                      <input type="range" min="5" max="30" step="1" value={params.inspiratoryPressure} onChange={(e) => setParams(p => ({...p, inspiratoryPressure: Number(e.target.value)}))} className="w-full accent-red-600"/>
+                    </div>
+                )}
+                
+                {/* PSV ONLY: Pressure Support & E-Sense */}
+                {params.mode === 'PSV' && (
+                    <div className='space-y-4'>
+                        <div>
+                            <div className="flex justify-between text-sm mb-1"><span>Pressure Support (PS)</span><span className="font-mono text-red-600">{params.pressureSupport} cmH2O</span></div>
+                            <input type="range" min="5" max="25" step="1" value={params.pressureSupport} onChange={(e) => setParams(p => ({...p, pressureSupport: Number(e.target.value)}))} className="w-full accent-red-600"/>
+                        </div>
+                        <div>
+                             <div className="flex justify-between text-sm mb-1"><span>E-Sense (Exp. Cycle)</span><span className="font-mono text-blue-600">{params.eSense} % Peak Flow</span></div>
+                              <input type="range" min="5" max="50" step="5" value={params.eSense} onChange={(e) => setParams(p => ({...p, eSense: Number(e.target.value)}))} className="w-full accent-blue-600"/>
+                        </div>
+                        <div className={`p-2 rounded border transition-colors duration-300 ${backupActive ? 'bg-red-100 border-red-200 animate-pulse' : 'bg-red-50 border-red-100'}`}>
+                             <div className="flex justify-between text-sm mb-1 text-red-700">
+                                 <span className="font-bold flex items-center"><Clock className="w-3 h-3 mr-1"/> Apnea Backup Time</span>
+                                 <span className="font-mono">{params.apneaTime} s</span>
+                             </div>
+                             <input type="range" min="5" max="60" step="1" value={params.apneaTime} onChange={(e) => setParams(p => ({...p, apneaTime: Number(e.target.value)}))} className="w-full accent-red-500"/>
+                             {backupActive ? (
+                                 <p className="text-[10px] font-bold text-red-600 mt-1 text-center">⚠️ BACKUP ACTIVE: PATIENT APNEA DETECTED</p>
+                             ) : (
+                                 <p className="text-[10px] text-red-500 mt-1">Triggers PCV backup if no breath for {params.apneaTime}s</p>
+                             )}
+                        </div>
+                    </div>
+                )}
+
+                {/* Respiratory Rate (All Modes EXCEPT PSV) */}
+                {params.mode !== 'PSV' && (
+                    <div>
+                      <div className="flex justify-between text-sm mb-1"><span>Respiratory Rate (RR)</span><span className="font-mono text-blue-600">{params.respiratoryRate} /min</span></div>
+                      <input type="range" min="8" max="40" step="1" value={params.respiratoryRate} onChange={(e) => setParams(p => ({...p, respiratoryRate: Number(e.target.value)}))} className="w-full accent-blue-600"/>
+                    </div>
+                )}
+
+                {/* Inspiratory Time (VCV/PCV) */}
+                {(params.mode === 'VCV' || params.mode === 'PCV') && (
+                    <div>
+                      <div className="flex justify-between text-sm mb-1"><span>Inspiratory Time (Ti)</span><span className="font-mono text-blue-600">{params.inspiratoryTime.toFixed(2)} s (Max: {derivedParams.TiMax} s)</span></div>
+                      <input type="range" min="0.3" max="3.0" step="0.05" value={params.inspiratoryTime} onChange={handleTiChange} className="w-full accent-blue-600"/>
+                    </div>
+                )}
+
+                {/* Derived I:E Ratio, Te, and Flow Rate */}
+                <div className="grid grid-cols-3 gap-2 text-center border-t border-gray-200 pt-3">
+                   <div className="p-1 bg-gray-50 rounded">
+                        <span className="text-xs text-gray-500 block">I:E Ratio</span>
+                        <span className="font-bold text-lg text-blue-700">{derivedParams.ieRatioDisplay}</span>
+                   </div>
+                   {/* NEW: Expiratory Time (Te) Display */}
+                   <div className="p-1 bg-gray-50 rounded">
+                        <span className="text-xs text-gray-500 block">Te (Exp)</span>
+                        <span className="font-bold text-lg text-blue-700">{derivedParams.expDuration.toFixed(2)} s</span>
+                   </div>
+                   <div className="p-1 bg-gray-50 rounded">
+                        <span className="text-xs text-gray-500 block">{params.mode === 'VCV' ? 'Req. Flow' : 'Peak Flow'}</span>
+                        <span className="font-bold text-lg text-blue-700">
+                            {params.mode === 'VCV' ? derivedParams.requiredFlowLpm.toFixed(0) : scales.fMax.toFixed(0)} L/min
+                        </span>
+                   </div>
                 </div>
 
+                {/* Flow Pattern Selection (VCV/PCV) */}
+                {(params.mode === 'VCV' || params.mode === 'PCV') && (
+                    <div className="border-t border-gray-200 pt-3">
+                      <label className="text-sm font-semibold mb-2 block">Flow Pattern</label>
+                      <div className="flex space-x-4">
+                        <label className="flex items-center text-sm"><input type="radio" name="flowPattern" value="SQUARE" checked={params.flowPattern === 'SQUARE'} onChange={(e) => setParams(p => ({...p, flowPattern: e.target.value}))} className="form-radio h-4 w-4 text-blue-600 border-gray-300"/><span className="ml-2">SQUARE (VCV)</span></label>
+                        <label className="flex items-center text-sm"><input type="radio" name="flowPattern" value="RAMP" checked={params.flowPattern === 'RAMP'} onChange={(e) => setParams(p => ({...p, flowPattern: e.target.value}))} className="form-radio h-4 w-4 text-blue-600 border-gray-300"/><span className="ml-2">RAMP (Decel)</span></label>
+                      </div>
+                    </div>
+                )}
+
+                {/* PEEP */}
                 <div>
-                  <label className="font-bold text-gray-700 flex justify-between mb-0.5">
-                    <span>RR</span>
-                    <span className="text-blue-600">{params.respiratoryRate}</span>
-                  </label>
-                  <input 
-                    type="range"
-                    min="6" max="40"
-                    value={params.respiratoryRate}
-                    onChange={(e) => setParams(p => ({ ...p, respiratoryRate: Number(e.target.value) }))}
-                    className="w-full h-1.5 bg-gray-300 rounded"
-                  />
+                  <div className="flex justify-between text-sm mb-1"><span>PEEP</span><span className="font-mono text-blue-600">{params.peep} cmH2O</span></div>
+                  <input type="range" min="0" max="20" step="1" value={params.peep} onChange={(e) => setParams(p => ({...p, peep: Number(e.target.value)}))} className="w-full accent-blue-600"/>
+                </div>
+                
+                {/* [NEW UI] FiO2 Slider */}
+                <div>
+                  <div className="flex justify-between text-sm mb-1"><span>FiO2</span><span className="font-mono text-blue-600">{(params.fiO2 * 100).toFixed(0)} %</span></div>
+                  <input type="range" min="0.21" max="1.0" step="0.01" value={params.fiO2} onChange={handleFiO2Change} className="w-full accent-blue-600"/>
+                  <p className="text-xs text-gray-500 mt-1">Fraction of Inspired Oxygen (21% - 100%)</p>
                 </div>
 
-                <div>
-                  <label className="font-bold text-gray-700 flex justify-between mb-0.5">
-                    <span>Ti</span>
-                    <span className="text-yellow-600">{params.inspiratoryTime.toFixed(2)}</span>
-                  </label>
-                  <input 
-                    type="range"
-                    min="0.3" max="2.0" step="0.1"
-                    value={params.inspiratoryTime}
-                    onChange={(e) => setParams(p => ({ ...p, inspiratoryTime: Number(e.target.value) }))}
-                    className="w-full h-1.5 bg-gray-300 rounded"
-                  />
-                </div>
 
-                <div>
-                  <label className="font-bold text-gray-700 flex justify-between mb-0.5">
-                    <span>PEEP</span>
-                    <span className="text-purple-600">{params.peep}</span>
-                  </label>
-                  <input 
-                    type="range"
-                    min="0" max="20"
-                    value={params.peep}
-                    onChange={(e) => setParams(p => ({ ...p, peep: Number(e.target.value) }))}
-                    className="w-full h-1.5 bg-gray-300 rounded"
-                  />
-                </div>
-
-                <div>
-                  <label className="font-bold text-gray-700 flex justify-between mb-0.5">
-                    <span>FiO2</span>
-                    <span className="text-green-600">{Math.round(params.fiO2 * 100)}%</span>
-                  </label>
-                  <input 
-                    type="range"
-                    min="21" max="100"
-                    value={params.fiO2 * 100}
-                    onChange={(e) => setParams(p => ({ ...p, fiO2: Number(e.target.value) / 100 }))}
-                    className="w-full h-1.5 bg-gray-300 rounded"
-                  />
-                </div>
               </div>
             </div>
 
-            {/* TOOLS */}
-            <div className="bg-blue-50 rounded-lg p-3 border border-blue-200 shadow-sm">
-              <h3 className="flex items-center gap-2 font-bold mb-2 text-sm text-blue-900">
-                <Zap size={16} /> Tools
-              </h3>
-              <button 
-                onClick={() => setIsRecruiting(!isRecruiting)}
-                className="w-full bg-white border border-blue-300 text-blue-700 text-xs font-semibold py-1.5 rounded hover:bg-blue-50">
-                {isRecruiting ? 'Stop Recruitment' : 'Start Recruitment (30/40 cmH2O)'}
-              </button>
-            </div>
-
-            {/* PATHOLOGY */}
-            <div className="bg-white rounded-lg p-3 border border-gray-200 shadow-sm">
-              <h3 className="flex items-center gap-2 font-bold mb-2 text-sm">
-                <AlertCircle size={16} className="text-orange-600" /> Pathology
-              </h3>
-
-              <select 
-                value={params.pathology}
-                onChange={handlePathologyChange}
-                className="w-full bg-white border border-gray-300 rounded px-2 py-1 text-xs text-gray-900 mb-2"
-              >
-                {Object.entries(PATHOLOGY_PRESETS).map(([key, preset]) => (
-                  <option key={key} value={key}>{preset.name}</option>
-                ))}
-              </select>
-
-              <div className="p-2 bg-gray-50 rounded text-xs text-gray-700 border border-gray-200">
-                <div className="grid grid-cols-2 gap-1 mb-1">
-                  <div>
-                    <p className="font-bold text-xs">Left</p>
-                    <p>R: {params.resL}</p>
-                    <p>C: {params.compL}</p>
-                  </div>
-                  <div>
-                    <p className="font-bold text-xs">Right</p>
-                    <p>R: {params.resR}</p>
-                    <p>C: {params.compR}</p>
-                  </div>
-                </div>
-                <p><strong>FRC:</strong> {(params.frcOffset * 1000).toFixed(0)} ml</p>
+            {/* Special Maneuvers (UPDATED) */}
+            <div className="bg-white rounded-xl p-6 border border-gray-300">
+              <div className="flex items-center mb-4 text-yellow-600"><TrendingUp className="w-5 h-5 mr-2"/><h2 className="font-bold">Tools / Maneuvers</h2></div>
+              
+              <div className="space-y-3">
+                 {/* Recruitment Button */}
+                 <button onClick={() => setIsRecruiting(!isRecruiting)} className={`w-full py-2 px-4 rounded-lg font-bold text-sm transition border ${isRecruiting ? 'bg-yellow-100 text-yellow-600 border-yellow-600' : 'bg-gray-100 text-gray-700 border-gray-300 hover:bg-gray-200'}`}>
+                    {isRecruiting ? 'RECRUITMENT ACTIVE' : 'Start Recruitment (30/40 cmH2O)'}
+                 </button>
+                 
+                 {/* HOLD BUTTONS */}
+                 <div className="grid grid-cols-2 gap-3">
+                     <button 
+                        onClick={() => setInspHoldRequest(!inspHoldRequest)} 
+                        className={`flex items-center justify-center py-3 px-3 rounded-lg font-bold text-xs transition border ${
+                            inspHoldRequest 
+                            ? 'bg-blue-600 text-white border-blue-700 animate-pulse' 
+                            : 'bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100'
+                        }`}
+                     >
+                        <PauseCircle className="w-4 h-4 mr-1" /> {inspHoldRequest ? 'HOLDING INSP...' : 'INSP HOLD'}
+                     </button>
+                     <button 
+                        onClick={() => setExpHoldRequest(!expHoldRequest)} 
+                        className={`flex items-center justify-center py-3 px-3 rounded-lg font-bold text-xs transition border ${
+                            expHoldRequest 
+                            ? 'bg-red-600 text-white border-red-700 animate-pulse' 
+                            : 'bg-red-50 text-red-700 border-red-200 hover:bg-red-100'
+                        }`}
+                     >
+                        <StopCircle className="w-4 h-4 mr-1" /> {expHoldRequest ? 'HOLDING EXP...' : 'EXP HOLD'}
+                     </button>
+                 </div>
+                 
+                 <p className="text-[10px] text-gray-500 text-center mt-1">Hold buttons will sync with the next breath cycle.</p>
               </div>
             </div>
+            
+            {/* Footer Added Here */}
+            <footer className="mt-8 pt-6 border-t border-gray-300 text-center text-xs text-gray-500">
+                &copy; 2025 NTWKKM &nbsp;|&nbsp; Powered by GitHub
+            </footer>
 
-            {/* BACKUP INFO */}
-            {backupActive && (
-              <div className="bg-red-50 rounded-lg p-3 border border-red-200 shadow-sm">
-                <p className="text-xs font-bold text-red-700">⚠️ BACKUP ACTIVE</p>
-                <p className="text-xs text-red-600">Patient apnea detected - backup breaths triggered</p>
-              </div>
-            )}
           </div>
         </div>
       </div>
     </div>
   );
-}
+};
 
 const root = ReactDOM.createRoot(document.getElementById('root'));
-root.render(<App />);
-
-export default App;
+root.render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);
