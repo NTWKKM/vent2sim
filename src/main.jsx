@@ -14,6 +14,15 @@ const CIRCUIT_COMPLIANCE = 2.5;
 
 const lerp = (start, end, factor) => start + (end - start) * factor;
 
+const calculatePBW = (gender, heightCm) => {
+  const heightInches = heightCm * 0.393701;
+  if (gender === 'M') {
+    return 50 + 2.3 * (heightInches - 60);
+  } else {
+    return 45.5 + 2.3 * (heightInches - 60);
+  }
+};
+
 function App() {
   const [params, setParams] = useState({
     mode: 'PCV',
@@ -31,10 +40,17 @@ function App() {
     resL: 15, compL: 50, resR: 15, compR: 50,
     shunt: 0.05, deadspace: 0.15, frcOffset: 0.0, lungCapacity: 3.0,
     gender: 'M', heightCm: 170, actualWeightKg: 70,
-    spontaneousRR: 0
+    spontaneousRR: 0,
+    pmusSyncMode: 'AUTO_SYNC'
   });
 
   const [isRunning, setIsRunning] = useState(false);
+  const [isRecruiting, setIsRecruiting] = useState(false);
+  const [inspHoldRequest, setInspHoldRequest] = useState(false);
+  const [expHoldRequest, setExpHoldRequest] = useState(false);
+  const [holdStatus, setHoldStatus] = useState(null);
+  const [backupActive, setBackupActive] = useState(false);
+
   const [scales, setScales] = useState({ pMax: 40, fMax: 60, vMax: 600 });
   const scalesRef = useRef(scales);
   const displayedScalesRef = useRef(scales);
@@ -84,15 +100,115 @@ function App() {
     const VtL = params.tidalVolume / 1000;
     let requiredFlow = params.flowPattern === 'SQUARE' ? VtL / safeTi : (2 * VtL) / safeTi;
 
+    const C_Total_ml = params.compL + params.compR;
+    const PBW = calculatePBW(params.gender, params.heightCm);
+    const safeVtMin = Math.round(4 * PBW);
+    const safeVtMax = Math.round(8 * PBW);
+
+    const calculatedPmus = params.spontaneousRR * 0.5;
+    let pmusStatus = "None";
+    let pmusColor = "text-gray-500";
+    if (params.spontaneousRR > 0) {
+      if (calculatedPmus < 5) {
+        pmusStatus = "Low Effort";
+        pmusColor = "text-blue-600";
+      } else if (calculatedPmus <= 10) {
+        pmusStatus = "Normal";
+        pmusColor = "text-emerald-600";
+      } else {
+        pmusStatus = "High Effort";
+        pmusColor = "text-red-600";
+      }
+    }
+
     return {
       cycleDuration,
       inspDuration: safeTi,
       expDuration,
       ieRatio: (expDuration / safeTi).toFixed(1),
       requiredFlowLps: requiredFlow,
-      requiredFlowLpm: requiredFlow * 60
+      requiredFlowLpm: requiredFlow * 60,
+      C_Total_ml,
+      PBW: PBW.toFixed(1),
+      safeVtRange: `${safeVtMin}-${safeVtMax} ml`,
+      isVtSafe: (params.tidalVolume >= safeVtMin && params.tidalVolume <= safeVtMax),
+      pmusMagnitude: calculatedPmus,
+      pmusStatus,
+      pmusColor
     };
   }, [params]);
+
+  const resetSimState = useCallback(() => {
+    const p = params;
+    const C_L_Lps = p.compL / 1000;
+    const C_R_Lps = p.compR / 1000;
+    const V_L_PEEP = (p.peep * C_L_Lps) + (p.frcOffset / 2);
+    const V_R_PEEP = (p.peep * C_R_Lps) + (p.frcOffset / 2);
+    const initialVolAbs = (V_L_PEEP + V_R_PEEP) * 1000;
+
+    simState.current = {
+      time: 0, cycleTime: 0, patientTime: 0, phase: 'EXP',
+      volL: V_L_PEEP, volR: V_R_PEEP,
+      paw: p.peep, valveFlow: 0, valvePressure: p.peep,
+      volCircuit: (p.peep * CIRCUIT_COMPLIANCE) / 1000,
+      flowTotal: 0, flowL: 0, flowR: 0,
+      recruitmentTimer: 0, recruitmentStep: 0,
+      pawSum: 0, pawCount: 0, pPlatTemp: p.peep, autoPeepTemp: p.peep,
+      volPeakCycle: initialVolAbs, currentPeakFlow: 0,
+      lastBreathTime: Date.now(), timeSinceLastBreath: 0,
+      isBackupCycle: false, holdTimer: 0, pPlatCaptured: false
+    };
+
+    history.current.paw.fill(p.peep);
+    history.current.flow.fill(0);
+    history.current.flowL.fill(0);
+    history.current.flowR.fill(0);
+    history.current.vol.fill(0);
+    history.current.currentLoopPV = [];
+    history.current.currentLoopFV = [];
+    history.current.lastLoopPV = [];
+    history.current.lastLoopFV = [];
+
+    const initScales = {
+      pMax: p.inspiratoryPressure + p.peep + 10,
+      fMax: 60,
+      vMax: p.tidalVolume + 200
+    };
+    setScales(initScales);
+    scalesRef.current = initScales;
+    displayedScalesRef.current = initScales;
+
+    setMonitoredValues({
+      Pplat: p.peep, Pmean: p.peep, Cstat: 0, AutoPEEP: 0,
+      TotalRR: 0, MV: 0, VtExp: 0, VPeakAbs: initialVolAbs, VPeakRel: 0,
+      SpO2: 98, EtCO2: 35
+    });
+    setBackupActive(false);
+    setInspHoldRequest(false);
+    setExpHoldRequest(false);
+    setHoldStatus(null);
+  }, [params.compL, params.compR, params.peep, params.frcOffset, params.inspiratoryPressure, params.tidalVolume]);
+
+  useEffect(() => {
+    resetSimState();
+  }, [resetSimState]);
+
+  const handlePathologyChange = (e) => {
+    const newPathology = e.target.value;
+    const preset = PATHOLOGY_PRESETS[newPathology] || PATHOLOGY_PRESETS['NORMAL'];
+    setParams(p => ({
+      ...p,
+      pathology: newPathology,
+      resL: preset.resL,
+      compL: preset.compL,
+      resR: preset.resR,
+      compR: preset.compR,
+      shunt: preset.shunt,
+      deadspace: preset.deadspace,
+      frcOffset: preset.frcOffset,
+      lungCapacity: preset.lungCapacity
+    }));
+  };
 
   const updatePhysics = useCallback(() => {
     if (!isRunning) return;
@@ -299,7 +415,6 @@ function App() {
       ctx.stroke();
     };
 
-    // Pressure
     ctxP.fillStyle = '#1f2937';
     ctxP.fillRect(0, 0, w, h);
     ctxP.fillStyle = '#f59e0b';
@@ -309,7 +424,6 @@ function App() {
     ctxP.fillText('PEAK: ' + Math.max(...history.current.paw).toFixed(1), w - 120, 22);
     drawLine(ctxP, history.current.paw, '#f59e0b', scales.pMax);
 
-    // Flow
     ctxF.fillStyle = '#1f2937';
     ctxF.fillRect(0, 0, w, h);
     ctxF.fillStyle = '#10b981';
@@ -319,7 +433,6 @@ function App() {
     ctxF.fillText('SCALE: ' + scales.fMax.toFixed(1), w - 150, 22);
     drawLine(ctxF, history.current.flow, '#10b981', scales.fMax, true);
 
-    // Volume
     ctxV.fillStyle = '#1f2937';
     ctxV.fillRect(0, 0, w, h);
     ctxV.fillStyle = '#3b82f6';
@@ -338,12 +451,10 @@ function App() {
     const w = ctxPV.canvas.width;
     const h = ctxPV.canvas.height;
 
-    // P-V Loop
     ctxPV.fillStyle = '#1f2937';
     ctxPV.fillRect(0, 0, w, h);
     ctxPV.strokeStyle = '#f59e0b';
     ctxPV.lineWidth = 2;
-    ctxPV.beginPath();
 
     const pMax = scales.pMax;
     const vMax = scales.vMax;
@@ -352,8 +463,8 @@ function App() {
     const pw = w - 60;
     const ph = h - 40;
 
-    // Ghost loop
     ctxPV.globalAlpha = 0.2;
+    ctxPV.beginPath();
     history.current.lastLoopPV.forEach((pt, i) => {
       const x = px + (pt.p / pMax) * pw;
       const y = py + ph - (pt.v / vMax) * ph;
@@ -362,7 +473,6 @@ function App() {
     });
     ctxPV.stroke();
 
-    // Current loop
     ctxPV.globalAlpha = 1.0;
     ctxPV.beginPath();
     history.current.currentLoopPV.forEach((pt, i) => {
@@ -373,17 +483,15 @@ function App() {
     });
     ctxPV.stroke();
 
-    // F-V Loop
     ctxFV.fillStyle = '#1f2937';
     ctxFV.fillRect(0, 0, w, h);
     ctxFV.strokeStyle = '#10b981';
     ctxFV.lineWidth = 2;
-    ctxFV.beginPath();
 
     const fMax = scales.fMax;
 
-    // Ghost loop
     ctxFV.globalAlpha = 0.2;
+    ctxFV.beginPath();
     history.current.lastLoopFV.forEach((pt, i) => {
       const x = px + (pt.v / vMax) * pw;
       const y = py + ph / 2 - (pt.f / fMax) * (ph / 2);
@@ -392,7 +500,6 @@ function App() {
     });
     ctxFV.stroke();
 
-    // Current loop
     ctxFV.globalAlpha = 1.0;
     ctxFV.beginPath();
     history.current.currentLoopFV.forEach((pt, i) => {
@@ -415,23 +522,6 @@ function App() {
     loop();
     return () => cancelAnimationFrame(animationFrameId);
   }, [updatePhysics, drawWaveforms, drawLoops]);
-
-  const handlePathologyChange = (e) => {
-    const newPathology = e.target.value;
-    const preset = PATHOLOGY_PRESETS[newPathology] || PATHOLOGY_PRESETS['NORMAL'];
-    setParams(p => ({
-      ...p,
-      pathology: newPathology,
-      resL: preset.resL,
-      compL: preset.compL,
-      resR: preset.resR,
-      compR: preset.compR,
-      shunt: preset.shunt,
-      deadspace: preset.deadspace,
-      frcOffset: preset.frcOffset,
-      lungCapacity: preset.lungCapacity
-    }));
-  };
 
   return (
     <div className="min-h-screen bg-white text-gray-900 p-3">
@@ -494,15 +584,15 @@ function App() {
               </div>
             </div>
 
-            {/* MONITORED VALUES - 6 boxes per row */}
+            {/* MONITORED VALUES - 6 boxes per row + 3 per row */}
             <div className="bg-white rounded-lg p-3 border border-gray-200 shadow-sm">
               <h3 className="flex items-center gap-2 font-bold mb-2 text-sm">
-                <BarChart2 size={16} className="text-blue-600" /> Monitor
+                <BarChart2 size={16} className="text-blue-600" /> Monitored Values
               </h3>
 
               <div className="grid grid-cols-6 gap-2">
                 <div className="bg-red-50 p-2.5 rounded border border-red-100">
-                  <p className="text-xs text-gray-600">P-Plat</p>
+                  <p className="text-xs text-gray-600">P-Plateau</p>
                   <p className="text-lg font-bold text-red-600">{monitoredValues.Pplat}</p>
                   <p className="text-xs text-gray-500">cmH2O</p>
                 </div>
@@ -517,12 +607,12 @@ function App() {
                   <p className="text-xs text-gray-500">/min</p>
                 </div>
                 <div className="bg-green-50 p-2.5 rounded border border-green-100">
-                  <p className="text-xs text-gray-600">MV</p>
+                  <p className="text-xs text-gray-600">MV (Exp.)</p>
                   <p className="text-lg font-bold text-green-600">{monitoredValues.MV.toFixed(1)}</p>
                   <p className="text-xs text-gray-500">L/min</p>
                 </div>
                 <div className="bg-cyan-50 p-2.5 rounded border border-cyan-100">
-                  <p className="text-xs text-gray-600">Vt</p>
+                  <p className="text-xs text-gray-600">Vt (Exp)</p>
                   <p className="text-lg font-bold text-cyan-600">{monitoredValues.VtExp}</p>
                   <p className="text-xs text-gray-500">ml</p>
                 </div>
@@ -533,20 +623,20 @@ function App() {
                 </div>
               </div>
 
-              {/* Second row of monitor values */}
+              {/* Second row - 3 boxes */}
               <div className="grid grid-cols-3 gap-2 mt-2">
                 <div className="bg-orange-50 p-2.5 rounded border border-orange-100">
                   <p className="text-xs text-gray-600">PEEPI</p>
                   <p className="text-lg font-bold text-orange-600">{monitoredValues.AutoPEEP}</p>
                   <p className="text-xs text-gray-500">cmH2O</p>
                 </div>
-                <div className={`p-2.5 rounded border ${monitoredValues.SpO2 < 90 ? 'bg-red-50 border-red-100' : 'bg-cyan-50 border-cyan-100'}`}>
-                  <p className="text-xs text-gray-600">SpO2</p>
-                  <p className={`text-lg font-bold ${monitoredValues.SpO2 < 90 ? 'text-red-600' : 'text-cyan-600'}`}>{monitoredValues.SpO2}</p>
+                <div className={`p-2.5 rounded border ${monitoredValues.SpO2 < 90 ? 'bg-red-50 border-red-100' : 'bg-blue-50 border-blue-100'}`}>
+                  <p className="text-xs text-gray-600">SpO2 (Est.)</p>
+                  <p className={`text-lg font-bold ${monitoredValues.SpO2 < 90 ? 'text-red-600' : 'text-blue-600'}`}>{monitoredValues.SpO2}</p>
                   <p className="text-xs text-gray-500">%</p>
                 </div>
                 <div className="bg-pink-50 p-2.5 rounded border border-pink-100">
-                  <p className="text-xs text-gray-600">EtCO2</p>
+                  <p className="text-xs text-gray-600">EtCO2 (Est.)</p>
                   <p className="text-lg font-bold text-pink-600">{monitoredValues.EtCO2}</p>
                   <p className="text-xs text-gray-500">mmHg</p>
                 </div>
@@ -653,8 +743,10 @@ function App() {
               <h3 className="flex items-center gap-2 font-bold mb-2 text-sm text-blue-900">
                 <Zap size={16} /> Tools
               </h3>
-              <button className="w-full bg-white border border-blue-300 text-blue-700 text-xs font-semibold py-1.5 rounded hover:bg-blue-50">
-                Recruitment
+              <button 
+                onClick={() => setIsRecruiting(!isRecruiting)}
+                className="w-full bg-white border border-blue-300 text-blue-700 text-xs font-semibold py-1.5 rounded hover:bg-blue-50">
+                {isRecruiting ? 'Stop Recruitment' : 'Start Recruitment (30/40 cmH2O)'}
               </button>
             </div>
 
@@ -690,6 +782,14 @@ function App() {
                 <p><strong>FRC:</strong> {(params.frcOffset * 1000).toFixed(0)} ml</p>
               </div>
             </div>
+
+            {/* BACKUP INFO */}
+            {backupActive && (
+              <div className="bg-red-50 rounded-lg p-3 border border-red-200 shadow-sm">
+                <p className="text-xs font-bold text-red-700">⚠️ BACKUP ACTIVE</p>
+                <p className="text-xs text-red-600">Patient apnea detected - backup breaths triggered</p>
+              </div>
+            )}
           </div>
         </div>
       </div>
