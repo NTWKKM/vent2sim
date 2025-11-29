@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import ReactDOM from 'react-dom/client';
-import { Play, Pause, Activity, Settings, BarChart2, AlertCircle, TrendingUp } from 'lucide-react';
+import { Play, Pause, Activity, Settings, BarChart2, AlertCircle, TrendingUp, Zap, RefreshCw } from 'lucide-react';
 import { getDynamicCompliance } from './physics/compliance';
 import { getDynamicResistance } from './physics/resistance';
 import { PATHOLOGY_PRESETS } from './physics/pathologyPresets';
@@ -283,7 +283,7 @@ function App() {
     const drawLine = (ctx, data, color, yMax, midY = false) => {
       ctx.beginPath();
       ctx.strokeStyle = color;
-      ctx.lineWidth = 2.5;
+      ctx.lineWidth = 2;
       
       data.forEach((val, i) => {
         const x = 40 + ((i / MAX_HISTORY) * (w - 50));
@@ -342,7 +342,7 @@ function App() {
     ctxPV.fillStyle = '#1f2937';
     ctxPV.fillRect(0, 0, w, h);
     ctxPV.strokeStyle = '#f59e0b';
-    ctxPV.lineWidth = 2.5;
+    ctxPV.lineWidth = 2;
     ctxPV.beginPath();
 
     const pMax = scales.pMax;
@@ -352,7 +352,7 @@ function App() {
     const pw = w - 60;
     const ph = h - 40;
 
-    // Ghost loop (last breath)
+    // Ghost loop
     ctxPV.globalAlpha = 0.2;
     history.current.lastLoopPV.forEach((pt, i) => {
       const x = px + (pt.p / pMax) * pw;
@@ -377,7 +377,7 @@ function App() {
     ctxFV.fillStyle = '#1f2937';
     ctxFV.fillRect(0, 0, w, h);
     ctxFV.strokeStyle = '#10b981';
-    ctxFV.lineWidth = 2.5;
+    ctxFV.lineWidth = 2;
     ctxFV.beginPath();
 
     const fMax = scales.fMax;
@@ -434,15 +434,15 @@ function App() {
   };
 
   return (
-    <div className="min-h-screen bg-gray-700 text-white p-4">
+    <div className="min-h-screen bg-white text-gray-900 p-4">
       <div className="max-w-7xl mx-auto">
         {/* HEADER */}
-        <header className="flex justify-between items-center mb-6 pb-4 border-b border-gray-600">
+        <header className="flex justify-between items-center mb-6 pb-4 border-b border-gray-200">
           <div className="flex items-center gap-3">
-            <Activity className="h-7 w-7 text-cyan-400" />
+            <Activity className="h-7 w-7 text-blue-600" />
             <div>
-              <h1 className="text-3xl font-bold">VentSim <span className="text-cyan-400">Dual-Lung</span></h1>
-              <p className="text-sm text-gray-400">VCV/PCV/PSV with Dual-Lung Pathology Simulation</p>
+              <h1 className="text-3xl font-bold">VentSim <span className="text-blue-600">Dual-Lung</span></h1>
+              <p className="text-sm text-gray-500">VCV/PCV/PSV with Dual-Lung Pathology Simulation</p>
             </div>
           </div>
 
@@ -459,34 +459,91 @@ function App() {
           </button>
         </header>
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-          {/* WAVEFORMS - 2/3 WIDTH */}
-          <div className="lg:col-span-2 space-y-3">
-            <div className="bg-gray-800 rounded-lg p-4 border border-gray-600 shadow-lg">
-              <h2 className="flex items-center gap-2 font-bold mb-3 text-base">
-                <TrendingUp size={18} /> Real-time Waveforms
-              </h2>
-              
-              <div className="space-y-2">
-                <div className="bg-gray-900 rounded border border-gray-600 p-2">
-                  <canvas ref={canvasRefP} width={800} height={140} className="w-full" />
+        {/* MAIN CONTENT */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
+          {/* WAVEFORMS - FULL WIDTH TOP */}
+          <div className="lg:col-span-3 bg-white rounded-lg p-4 border border-gray-200 shadow-sm">
+            <h2 className="flex items-center gap-2 font-bold mb-3 text-lg">
+              <TrendingUp size={20} className="text-blue-600" /> Real-time Waveforms
+            </h2>
+            
+            <div className="space-y-2">
+              <div className="bg-gray-900 rounded border border-gray-300 p-2">
+                <canvas ref={canvasRefP} width={1000} height={120} className="w-full" />
+              </div>
+              <div className="bg-gray-900 rounded border border-gray-300 p-2">
+                <canvas ref={canvasRefF} width={1000} height={120} className="w-full" />
+              </div>
+              <div className="bg-gray-900 rounded border border-gray-300 p-2">
+                <canvas ref={canvasRefV} width={1000} height={120} className="w-full" />
+              </div>
+            </div>
+          </div>
+
+          {/* MONITORED VALUES + LOOPS */}
+          <div className="lg:col-span-2 space-y-4">
+            {/* Monitored Values */}
+            <div className="bg-white rounded-lg p-4 border border-gray-200 shadow-sm">
+              <h3 className="flex items-center gap-2 font-bold mb-3 text-base">
+                <BarChart2 size={18} className="text-blue-600" /> Monitored Values
+              </h3>
+
+              <div className="grid grid-cols-3 gap-3">
+                <div className="bg-red-50 p-3 rounded-lg border border-red-100">
+                  <p className="text-xs text-gray-600">P-Plateau</p>
+                  <p className="text-2xl font-bold text-red-600">{monitoredValues.Pplat}</p>
+                  <p className="text-xs text-gray-500">cmH2O</p>
                 </div>
-                <div className="bg-gray-900 rounded border border-gray-600 p-2">
-                  <canvas ref={canvasRefF} width={800} height={140} className="w-full" />
+                <div className="bg-yellow-50 p-3 rounded-lg border border-yellow-100">
+                  <p className="text-xs text-gray-600">Paw-mean</p>
+                  <p className="text-2xl font-bold text-yellow-600">{monitoredValues.Pmean}</p>
+                  <p className="text-xs text-gray-500">cmH2O</p>
                 </div>
-                <div className="bg-gray-900 rounded border border-gray-600 p-2">
-                  <canvas ref={canvasRefV} width={800} height={140} className="w-full" />
+                <div className="bg-blue-50 p-3 rounded-lg border border-blue-100">
+                  <p className="text-xs text-gray-600">RR Total</p>
+                  <p className="text-2xl font-bold text-blue-600">{monitoredValues.TotalRR}</p>
+                  <p className="text-xs text-gray-500">/min</p>
+                </div>
+                <div className="bg-green-50 p-3 rounded-lg border border-green-100">
+                  <p className="text-xs text-gray-600">MV (Exp.)</p>
+                  <p className="text-2xl font-bold text-green-600">{monitoredValues.MV.toFixed(1)}</p>
+                  <p className="text-xs text-gray-500">L/min</p>
+                </div>
+                <div className="bg-cyan-50 p-3 rounded-lg border border-cyan-100">
+                  <p className="text-xs text-gray-600">Vt (Exp)</p>
+                  <p className="text-2xl font-bold text-cyan-600">{monitoredValues.VtExp}</p>
+                  <p className="text-xs text-gray-500">ml</p>
+                </div>
+                <div className="bg-purple-50 p-3 rounded-lg border border-purple-100">
+                  <p className="text-xs text-gray-600">Cstat</p>
+                  <p className="text-2xl font-bold text-purple-600">{monitoredValues.Cstat}</p>
+                  <p className="text-xs text-gray-500">ml/cmH2O</p>
+                </div>
+                <div className="bg-orange-50 p-3 rounded-lg border border-orange-100">
+                  <p className="text-xs text-gray-600">PEEPI</p>
+                  <p className="text-2xl font-bold text-orange-600">{monitoredValues.AutoPEEP}</p>
+                  <p className="text-xs text-gray-500">cmH2O</p>
+                </div>
+                <div className={`p-3 rounded-lg border ${monitoredValues.SpO2 < 90 ? 'bg-red-50 border-red-100' : 'bg-blue-50 border-blue-100'}`}>
+                  <p className="text-xs text-gray-600">SpO2 (Est.)</p>
+                  <p className={`text-2xl font-bold ${monitoredValues.SpO2 < 90 ? 'text-red-600' : 'text-blue-600'}`}>{monitoredValues.SpO2}</p>
+                  <p className="text-xs text-gray-500">%</p>
+                </div>
+                <div className="bg-pink-50 p-3 rounded-lg border border-pink-100">
+                  <p className="text-xs text-gray-600">EtCO2 (Est.)</p>
+                  <p className="text-2xl font-bold text-pink-600">{monitoredValues.EtCO2}</p>
+                  <p className="text-xs text-gray-500">mmHg</p>
                 </div>
               </div>
             </div>
 
-            {/* LOOPS */}
+            {/* Loops */}
             <div className="grid grid-cols-2 gap-3">
-              <div className="bg-gray-800 rounded-lg p-3 border border-gray-600 shadow-lg">
+              <div className="bg-white rounded-lg p-3 border border-gray-200 shadow-sm">
                 <h3 className="text-sm font-bold mb-2">P-V Loop</h3>
                 <canvas ref={canvasRefPV} width={300} height={200} className="w-full bg-gray-900 rounded" />
               </div>
-              <div className="bg-gray-800 rounded-lg p-3 border border-gray-600 shadow-lg">
+              <div className="bg-white rounded-lg p-3 border border-gray-200 shadow-sm">
                 <h3 className="text-sm font-bold mb-2">F-V Loop</h3>
                 <canvas ref={canvasRefFV} width={300} height={200} className="w-full bg-gray-900 rounded" />
               </div>
@@ -494,20 +551,20 @@ function App() {
           </div>
 
           {/* CONTROLS - 1/3 WIDTH */}
-          <div className="space-y-3">
+          <div className="space-y-4">
             {/* Ventilator Settings */}
-            <div className="bg-gray-800 rounded-lg p-4 border border-gray-600 shadow-lg">
+            <div className="bg-white rounded-lg p-4 border border-gray-200 shadow-sm">
               <h3 className="flex items-center gap-2 font-bold mb-3 text-base">
-                <Settings size={18} /> Ventilator Settings
+                <Settings size={18} className="text-blue-600" /> Ventilator Settings
               </h3>
 
               <div className="space-y-3 text-sm">
                 <div>
-                  <label className="text-xs font-bold text-gray-300">Mode</label>
+                  <label className="text-xs font-bold text-gray-700">Mode</label>
                   <select 
                     value={params.mode}
                     onChange={(e) => setParams(p => ({ ...p, mode: e.target.value }))}
-                    className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1.5 text-sm text-white hover:border-gray-500"
+                    className="w-full bg-white border border-gray-300 rounded px-2 py-1.5 text-sm text-gray-900 hover:border-gray-400"
                   >
                     <option>VCV</option>
                     <option>PCV</option>
@@ -516,145 +573,117 @@ function App() {
                 </div>
 
                 <div>
-                  <label className="text-xs font-bold text-gray-300 flex justify-between">
+                  <label className="text-xs font-bold text-gray-700 flex justify-between">
                     <span>Pinsp (cmH2O)</span>
-                    <span className="text-red-400">{params.inspiratoryPressure}</span>
+                    <span className="text-red-600">{params.inspiratoryPressure}</span>
                   </label>
                   <input 
                     type="range"
                     min="5" max="30"
                     value={params.inspiratoryPressure}
                     onChange={(e) => setParams(p => ({ ...p, inspiratoryPressure: Number(e.target.value) }))}
-                    className="w-full h-2 bg-gray-600 rounded appearance-none cursor-pointer"
+                    className="w-full h-2 bg-gray-300 rounded appearance-none cursor-pointer"
                   />
                 </div>
 
                 <div>
-                  <label className="text-xs font-bold text-gray-300 flex justify-between">
+                  <label className="text-xs font-bold text-gray-700 flex justify-between">
                     <span>RR (/min)</span>
-                    <span className="text-blue-400">{params.respiratoryRate}</span>
+                    <span className="text-blue-600">{params.respiratoryRate}</span>
                   </label>
                   <input 
                     type="range"
                     min="6" max="40"
                     value={params.respiratoryRate}
                     onChange={(e) => setParams(p => ({ ...p, respiratoryRate: Number(e.target.value) }))}
-                    className="w-full h-2 bg-gray-600 rounded appearance-none cursor-pointer"
+                    className="w-full h-2 bg-gray-300 rounded appearance-none cursor-pointer"
                   />
                 </div>
 
                 <div>
-                  <label className="text-xs font-bold text-gray-300 flex justify-between">
+                  <label className="text-xs font-bold text-gray-700 flex justify-between">
                     <span>Ti (sec)</span>
-                    <span className="text-yellow-400">{params.inspiratoryTime.toFixed(2)}</span>
+                    <span className="text-yellow-600">{params.inspiratoryTime.toFixed(2)}</span>
                   </label>
                   <input 
                     type="range"
                     min="0.3" max="2.0" step="0.1"
                     value={params.inspiratoryTime}
                     onChange={(e) => setParams(p => ({ ...p, inspiratoryTime: Number(e.target.value) }))}
-                    className="w-full h-2 bg-gray-600 rounded appearance-none cursor-pointer"
+                    className="w-full h-2 bg-gray-300 rounded appearance-none cursor-pointer"
                   />
                 </div>
 
                 <div>
-                  <label className="text-xs font-bold text-gray-300 flex justify-between">
+                  <label className="text-xs font-bold text-gray-700 flex justify-between">
                     <span>PEEP (cmH2O)</span>
-                    <span className="text-purple-400">{params.peep}</span>
+                    <span className="text-purple-600">{params.peep}</span>
                   </label>
                   <input 
                     type="range"
                     min="0" max="20"
                     value={params.peep}
                     onChange={(e) => setParams(p => ({ ...p, peep: Number(e.target.value) }))}
-                    className="w-full h-2 bg-gray-600 rounded appearance-none cursor-pointer"
+                    className="w-full h-2 bg-gray-300 rounded appearance-none cursor-pointer"
                   />
                 </div>
 
                 <div>
-                  <label className="text-xs font-bold text-gray-300 flex justify-between">
+                  <label className="text-xs font-bold text-gray-700 flex justify-between">
                     <span>FiO2 (%)</span>
-                    <span className="text-green-400">{Math.round(params.fiO2 * 100)}</span>
+                    <span className="text-green-600">{Math.round(params.fiO2 * 100)}</span>
                   </label>
                   <input 
                     type="range"
                     min="21" max="100"
                     value={params.fiO2 * 100}
                     onChange={(e) => setParams(p => ({ ...p, fiO2: Number(e.target.value) / 100 }))}
-                    className="w-full h-2 bg-gray-600 rounded appearance-none cursor-pointer"
+                    className="w-full h-2 bg-gray-300 rounded appearance-none cursor-pointer"
                   />
                 </div>
               </div>
             </div>
 
-            {/* Monitoring */}
-            <div className="bg-gray-800 rounded-lg p-4 border border-gray-600 shadow-lg">
-              <h3 className="flex items-center gap-2 font-bold mb-3 text-base">
-                <BarChart2 size={18} /> Monitored Values
+            {/* Tools & Maneuvers */}
+            <div className="bg-gradient-to-br from-blue-50 to-cyan-50 rounded-lg p-4 border border-blue-200 shadow-sm">
+              <h3 className="flex items-center gap-2 font-bold mb-3 text-base text-blue-900">
+                <Zap size={18} /> Tools / Maneuvers
               </h3>
-
-              <div className="space-y-2 text-xs">
-                <div className="flex justify-between py-1 border-b border-gray-700">
-                  <span className="text-gray-400">P-Plateau</span>
-                  <span className="font-bold text-red-400">{monitoredValues.Pplat} cmH2O</span>
-                </div>
-                <div className="flex justify-between py-1 border-b border-gray-700">
-                  <span className="text-gray-400">Paw-mean</span>
-                  <span className="font-bold text-yellow-400">{monitoredValues.Pmean} cmH2O</span>
-                </div>
-                <div className="flex justify-between py-1 border-b border-gray-700">
-                  <span className="text-gray-400">RR Total</span>
-                  <span className="font-bold text-blue-400">{monitoredValues.TotalRR} /min</span>
-                </div>
-                <div className="flex justify-between py-1 border-b border-gray-700">
-                  <span className="text-gray-400">MV</span>
-                  <span className="font-bold text-green-400">{monitoredValues.MV.toFixed(1)} L/min</span>
-                </div>
-                <div className="flex justify-between py-1 border-b border-gray-700">
-                  <span className="text-gray-400">Vt (Exp)</span>
-                  <span className="font-bold text-cyan-400">{monitoredValues.VtExp} ml</span>
-                </div>
-                <div className="flex justify-between py-1 border-b border-gray-700">
-                  <span className="text-gray-400">Cstat</span>
-                  <span className="font-bold text-pink-400">{monitoredValues.Cstat} ml/cmH2O</span>
-                </div>
-                <div className="flex justify-between py-1 border-b border-gray-700">
-                  <span className="text-gray-400">PEEPI</span>
-                  <span className="font-bold text-orange-400">{monitoredValues.AutoPEEP} cmH2O</span>
-                </div>
-                <div className="flex justify-between py-1 border-b border-gray-700">
-                  <span className="text-gray-400">SpO2</span>
-                  <span className={`font-bold ${monitoredValues.SpO2 < 90 ? 'text-red-400' : 'text-blue-400'}`}>
-                    {monitoredValues.SpO2}%
-                  </span>
-                </div>
-                <div className="flex justify-between py-1">
-                  <span className="text-gray-400">EtCO2</span>
-                  <span className="font-bold text-pink-400">{monitoredValues.EtCO2} mmHg</span>
-                </div>
-              </div>
+              <button className="w-full bg-white border border-blue-300 text-blue-700 font-semibold py-2 rounded-lg hover:bg-blue-50 transition">
+                Start Recruitment (30/40 cmH2O)
+              </button>
             </div>
 
             {/* Pathology */}
-            <div className="bg-gray-800 rounded-lg p-4 border border-gray-600 shadow-lg">
+            <div className="bg-white rounded-lg p-4 border border-gray-200 shadow-sm">
               <h3 className="flex items-center gap-2 font-bold mb-3 text-base">
-                <AlertCircle size={18} /> Pathology Preset
+                <AlertCircle size={18} className="text-orange-600" /> Pathology Preset
               </h3>
 
               <select 
                 value={params.pathology}
                 onChange={handlePathologyChange}
-                className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-2 text-sm text-white hover:border-gray-500"
+                className="w-full bg-white border border-gray-300 rounded px-2 py-2 text-sm text-gray-900 hover:border-gray-400"
               >
                 {Object.entries(PATHOLOGY_PRESETS).map(([key, preset]) => (
                   <option key={key} value={key}>{preset.name}</option>
                 ))}
               </select>
 
-              <div className="mt-3 text-xs text-gray-400">
-                <p><strong className="text-gray-300">L:</strong> R={params.resL} C={params.compL}</p>
-                <p><strong className="text-gray-300">R:</strong> R={params.resR} C={params.compR}</p>
-                <p className="mt-1"><strong className="text-gray-300">FRC:</strong> {(params.frcOffset * 1000).toFixed(0)} ml</p>
+              <div className="mt-3 p-3 bg-gray-50 rounded text-xs text-gray-700 border border-gray-200">
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <p className="font-bold text-gray-800">Left Lung</p>
+                    <p>R: {params.resL} cmH2O/(L/s)</p>
+                    <p>C: {params.compL} ml/cmH2O</p>
+                  </div>
+                  <div>
+                    <p className="font-bold text-gray-800">Right Lung</p>
+                    <p>R: {params.resR} cmH2O/(L/s)</p>
+                    <p>C: {params.compR} ml/cmH2O</p>
+                  </div>
+                </div>
+                <p className="mt-2 text-gray-600"><strong>FRC:</strong> {(params.frcOffset * 1000).toFixed(0)} ml</p>
               </div>
             </div>
           </div>
