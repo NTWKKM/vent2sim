@@ -193,6 +193,19 @@ function App() {
     resetSimState();
   }, [resetSimState]);
 
+  // --- Main Animation Loop (Animation Frame Rendering) ---
+  useEffect(() => {
+    let animationFrameId;
+    const loop = () => {
+      updatePhysics();
+      drawWaveforms();
+      drawLoops();
+      animationFrameId = requestAnimationFrame(loop);
+    };
+    loop();
+    return () => cancelAnimationFrame(animationFrameId);
+  }, [updatePhysics, drawWaveforms, drawLoops]);
+
   const handlePathologyChange = (e) => {
     const newPathology = e.target.value;
     const preset = PATHOLOGY_PRESETS[newPathology] || PATHOLOGY_PRESETS['NORMAL'];
