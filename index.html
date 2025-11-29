@@ -1,13 +1,24 @@
-<!doctype html>
-<html lang="en">
+<!DOCTYPE html>
+<html lang="en" class="dark">
   <head>
     <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Ventilator Dual-Lungs Simulation</title>
+    <title>VentSim - Ventilator Simulator</title>
+    <style>
+      html.dark {
+        background-color: #374151;
+        color-scheme: dark;
+      }
+      body {
+        margin: 0;
+        padding: 0;
+        background-color: #374151;
+      }
+    </style>
   </head>
-  <body>
+  <body class="bg-gray-700 text-white">
     <div id="root"></div>
-    <!-- บรรทัดนี้สำคัญมาก: เป็นตัวเรียกโค้ด React ของเราทำงาน -->
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>
