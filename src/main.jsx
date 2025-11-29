@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import ReactDOM from 'react-dom/client';
-import { Play, Pause, Activity, Settings, BarChart2, AlertCircle } from 'lucide-react';
+import { Play, Pause, Activity, Settings, BarChart2, AlertCircle, TrendingUp } from 'lucide-react';
 import { getDynamicCompliance } from './physics/compliance';
 import { getDynamicResistance } from './physics/resistance';
 import { PATHOLOGY_PRESETS } from './physics/pathologyPresets';
@@ -8,6 +8,9 @@ import { PATHOLOGY_PRESETS } from './physics/pathologyPresets';
 const DT = 0.016;
 const MAX_HISTORY = 1500;
 const PEAK_WINDOW = 300;
+const PCV_RISE_SMOOTHING = 0.08;
+const EXP_RESISTANCE_MULTIPLIER = 1.2;
+const CIRCUIT_COMPLIANCE = 2.5;
 
 const lerp = (start, end, factor) => start + (end - start) * factor;
 
@@ -128,6 +131,20 @@ function App() {
             const drivingP = Math.max(1, s.pPlatTemp - p.peep);
             const cstat = Vt_Final_mL / drivingP;
 
+            const baseShunt = p.shunt;
+            const baseDeadspace = p.deadspace;
+            const PmeanEffect = Math.max(0, ((s.pawSum / Math.max(1, s.pawCount)) - 5) * 0.01);
+            const actualShunt = Math.max(0.01, baseShunt - PmeanEffect);
+            let estimatedSpO2 = 99 - (actualShunt * 100) * 1.5;
+            const fio2Effect = (p.fiO2 - 0.40) * 15;
+            estimatedSpO2 += fio2Effect;
+            estimatedSpO2 = Math.max(50, Math.min(100, estimatedSpO2));
+
+            const idealMV = 6.0;
+            const effectiveMV = (instantRR * Vt_Final_mL / 1000) * (1 - baseDeadspace);
+            let estimatedEtCO2 = 40 * (idealMV / Math.max(0.1, effectiveMV));
+            estimatedEtCO2 = Math.max(10, Math.min(100, estimatedEtCO2));
+
             setMonitoredValues(m => ({
               ...m,
               TotalRR: Math.round(instantRR * 10) / 10,
@@ -135,7 +152,10 @@ function App() {
               VtExp: Math.round(Vt_Final_mL),
               Cstat: Math.round(cstat * 10) / 10,
               Pplat: Math.round(s.pPlatTemp * 10) / 10,
-              Pmean: Math.round((s.pawSum / Math.max(1, s.pawCount)) * 10) / 10
+              Pmean: Math.round((s.pawSum / Math.max(1, s.pawCount)) * 10) / 10,
+              AutoPEEP: Math.round(Math.max(0, ((s.volL / CL_dynamic + s.volR / CR_dynamic) / 2) - p.peep) * 10) / 10,
+              SpO2: Math.round(estimatedSpO2),
+              EtCO2: Math.round(estimatedEtCO2)
             }));
           }
         }
@@ -145,6 +165,13 @@ function App() {
         s.volPeakCycle = (s.volL + s.volR) * 1000;
         s.pawSum = 0;
         s.pawCount = 0;
+        
+        if (history.current.currentLoopPV.length > 10) {
+          history.current.lastLoopPV = [...history.current.currentLoopPV];
+          history.current.lastLoopFV = [...history.current.currentLoopFV];
+        }
+        history.current.currentLoopPV = [];
+        history.current.currentLoopFV = [];
       }
 
       const PelL = s.volL / CL_dynamic;
@@ -153,8 +180,8 @@ function App() {
       const PalvR = PelR;
 
       let currentPaw = p.peep;
-      const RL = RL_dynamic * (s.phase === 'EXP' ? 1.2 : 1);
-      const RR = RR_dynamic * (s.phase === 'EXP' ? 1.2 : 1);
+      const RL = RL_dynamic * (s.phase === 'EXP' ? EXP_RESISTANCE_MULTIPLIER : 1);
+      const RR = RR_dynamic * (s.phase === 'EXP' ? EXP_RESISTANCE_MULTIPLIER : 1);
 
       if (s.phase === 'INS') {
         if (p.mode === 'VCV') {
@@ -250,12 +277,13 @@ function App() {
 
     updateAutoScales();
 
+    const w = ctxP.canvas.width;
+    const h = ctxP.canvas.height;
+
     const drawLine = (ctx, data, color, yMax, midY = false) => {
-      const w = ctx.canvas.width;
-      const h = ctx.canvas.height;
       ctx.beginPath();
       ctx.strokeStyle = color;
-      ctx.lineWidth = 2;
+      ctx.lineWidth = 2.5;
       
       data.forEach((val, i) => {
         const x = 40 + ((i / MAX_HISTORY) * (w - 50));
@@ -271,33 +299,34 @@ function App() {
       ctx.stroke();
     };
 
-    // Clear & draw Pressure
-    const w = ctxP.canvas.width;
-    const h = ctxP.canvas.height;
+    // Pressure
     ctxP.fillStyle = '#1f2937';
     ctxP.fillRect(0, 0, w, h);
     ctxP.fillStyle = '#f59e0b';
+    ctxP.font = 'bold 13px sans-serif';
+    ctxP.fillText('Paw (cmH2O)', 50, 22);
     ctxP.font = '12px sans-serif';
-    ctxP.fillText('Paw (cmH2O)', 50, 20);
-    ctxP.fillText('PEAK: ' + Math.max(...history.current.paw).toFixed(1), w - 120, 20);
+    ctxP.fillText('PEAK: ' + Math.max(...history.current.paw).toFixed(1), w - 120, 22);
     drawLine(ctxP, history.current.paw, '#f59e0b', scales.pMax);
 
-    // Clear & draw Flow
+    // Flow
     ctxF.fillStyle = '#1f2937';
     ctxF.fillRect(0, 0, w, h);
     ctxF.fillStyle = '#10b981';
+    ctxF.font = 'bold 13px sans-serif';
+    ctxF.fillText('Flow (L/min)', 50, 22);
     ctxF.font = '12px sans-serif';
-    ctxF.fillText('Flow (L/min)', 50, 20);
-    ctxF.fillText('SCALE: ' + scales.fMax.toFixed(1), w - 150, 20);
+    ctxF.fillText('SCALE: ' + scales.fMax.toFixed(1), w - 150, 22);
     drawLine(ctxF, history.current.flow, '#10b981', scales.fMax, true);
 
-    // Clear & draw Volume
+    // Volume
     ctxV.fillStyle = '#1f2937';
     ctxV.fillRect(0, 0, w, h);
     ctxV.fillStyle = '#3b82f6';
+    ctxV.font = 'bold 13px sans-serif';
+    ctxV.fillText('Volume (ml)', 50, 22);
     ctxV.font = '12px sans-serif';
-    ctxV.fillText('Volume (ml)', 50, 20);
-    ctxV.fillText('Max: ' + Math.max(...history.current.vol).toFixed(0), w - 150, 20);
+    ctxV.fillText('Max: ' + Math.max(...history.current.vol).toFixed(0), w - 150, 22);
     drawLine(ctxV, history.current.vol, '#3b82f6', scales.vMax);
   }, [scales, updateAutoScales]);
 
@@ -313,7 +342,7 @@ function App() {
     ctxPV.fillStyle = '#1f2937';
     ctxPV.fillRect(0, 0, w, h);
     ctxPV.strokeStyle = '#f59e0b';
-    ctxPV.lineWidth = 2;
+    ctxPV.lineWidth = 2.5;
     ctxPV.beginPath();
 
     const pMax = scales.pMax;
@@ -323,6 +352,19 @@ function App() {
     const pw = w - 60;
     const ph = h - 40;
 
+    // Ghost loop (last breath)
+    ctxPV.globalAlpha = 0.2;
+    history.current.lastLoopPV.forEach((pt, i) => {
+      const x = px + (pt.p / pMax) * pw;
+      const y = py + ph - (pt.v / vMax) * ph;
+      if (i === 0) ctxPV.moveTo(x, y);
+      else ctxPV.lineTo(x, y);
+    });
+    ctxPV.stroke();
+
+    // Current loop
+    ctxPV.globalAlpha = 1.0;
+    ctxPV.beginPath();
     history.current.currentLoopPV.forEach((pt, i) => {
       const x = px + (pt.p / pMax) * pw;
       const y = py + ph - (pt.v / vMax) * ph;
@@ -335,10 +377,24 @@ function App() {
     ctxFV.fillStyle = '#1f2937';
     ctxFV.fillRect(0, 0, w, h);
     ctxFV.strokeStyle = '#10b981';
-    ctxFV.lineWidth = 2;
+    ctxFV.lineWidth = 2.5;
     ctxFV.beginPath();
 
     const fMax = scales.fMax;
+
+    // Ghost loop
+    ctxFV.globalAlpha = 0.2;
+    history.current.lastLoopFV.forEach((pt, i) => {
+      const x = px + (pt.v / vMax) * pw;
+      const y = py + ph / 2 - (pt.f / fMax) * (ph / 2);
+      if (i === 0) ctxFV.moveTo(x, y);
+      else ctxFV.lineTo(x, y);
+    });
+    ctxFV.stroke();
+
+    // Current loop
+    ctxFV.globalAlpha = 1.0;
+    ctxFV.beginPath();
     history.current.currentLoopFV.forEach((pt, i) => {
       const x = px + (pt.v / vMax) * pw;
       const y = py + ph / 2 - (pt.f / fMax) * (ph / 2);
@@ -380,33 +436,35 @@ function App() {
   return (
     <div className="min-h-screen bg-gray-700 text-white p-4">
       <div className="max-w-7xl mx-auto">
+        {/* HEADER */}
         <header className="flex justify-between items-center mb-6 pb-4 border-b border-gray-600">
           <div className="flex items-center gap-3">
-            <Activity className="h-6 w-6 text-blue-400" />
+            <Activity className="h-7 w-7 text-cyan-400" />
             <div>
-              <h1 className="text-2xl font-bold">VentSim <span className="text-blue-400">Dual-Lung</span></h1>
-              <p className="text-xs text-gray-400">VC, PC, PS Mode Simulator with Dual-Lung Pathology</p>
+              <h1 className="text-3xl font-bold">VentSim <span className="text-cyan-400">Dual-Lung</span></h1>
+              <p className="text-sm text-gray-400">VCV/PCV/PSV with Dual-Lung Pathology Simulation</p>
             </div>
           </div>
 
           <button
             onClick={() => setIsRunning(!isRunning)}
-            className={`flex items-center gap-2 px-5 py-2 rounded-full font-bold transition ${
+            className={`flex items-center gap-2 px-6 py-2.5 rounded-full font-bold transition text-base ${
               isRunning 
-                ? 'bg-red-600 hover:bg-red-700 text-white' 
-                : 'bg-green-600 hover:bg-green-700 text-white'
+                ? 'bg-red-600 hover:bg-red-700 text-white shadow-lg' 
+                : 'bg-green-600 hover:bg-green-700 text-white shadow-lg'
             }`}
           >
-            {isRunning ? <Pause size={16} /> : <Play size={16} />}
+            {isRunning ? <Pause size={18} /> : <Play size={18} />}
             {isRunning ? 'STOP' : 'START'}
           </button>
         </header>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          {/* WAVEFORMS - 2/3 WIDTH */}
           <div className="lg:col-span-2 space-y-3">
-            <div className="bg-gray-800 rounded-lg p-4 border border-gray-600">
-              <h2 className="flex items-center gap-2 font-bold mb-3 text-sm">
-                <Activity size={16} /> Real-time Waveforms
+            <div className="bg-gray-800 rounded-lg p-4 border border-gray-600 shadow-lg">
+              <h2 className="flex items-center gap-2 font-bold mb-3 text-base">
+                <TrendingUp size={18} /> Real-time Waveforms
               </h2>
               
               <div className="space-y-2">
@@ -422,31 +480,34 @@ function App() {
               </div>
             </div>
 
+            {/* LOOPS */}
             <div className="grid grid-cols-2 gap-3">
-              <div className="bg-gray-800 rounded-lg p-3 border border-gray-600">
-                <h3 className="text-xs font-bold mb-2">P-V Loop</h3>
+              <div className="bg-gray-800 rounded-lg p-3 border border-gray-600 shadow-lg">
+                <h3 className="text-sm font-bold mb-2">P-V Loop</h3>
                 <canvas ref={canvasRefPV} width={300} height={200} className="w-full bg-gray-900 rounded" />
               </div>
-              <div className="bg-gray-800 rounded-lg p-3 border border-gray-600">
-                <h3 className="text-xs font-bold mb-2">F-V Loop</h3>
+              <div className="bg-gray-800 rounded-lg p-3 border border-gray-600 shadow-lg">
+                <h3 className="text-sm font-bold mb-2">F-V Loop</h3>
                 <canvas ref={canvasRefFV} width={300} height={200} className="w-full bg-gray-900 rounded" />
               </div>
             </div>
           </div>
 
+          {/* CONTROLS - 1/3 WIDTH */}
           <div className="space-y-3">
-            <div className="bg-gray-800 rounded-lg p-4 border border-gray-600">
-              <h3 className="flex items-center gap-2 font-bold mb-3 text-sm">
-                <Settings size={16} /> Ventilator Settings
+            {/* Ventilator Settings */}
+            <div className="bg-gray-800 rounded-lg p-4 border border-gray-600 shadow-lg">
+              <h3 className="flex items-center gap-2 font-bold mb-3 text-base">
+                <Settings size={18} /> Ventilator Settings
               </h3>
 
               <div className="space-y-3 text-sm">
                 <div>
-                  <label className="text-xs font-bold">Mode</label>
+                  <label className="text-xs font-bold text-gray-300">Mode</label>
                   <select 
                     value={params.mode}
                     onChange={(e) => setParams(p => ({ ...p, mode: e.target.value }))}
-                    className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-xs text-white"
+                    className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1.5 text-sm text-white hover:border-gray-500"
                   >
                     <option>VCV</option>
                     <option>PCV</option>
@@ -455,122 +516,146 @@ function App() {
                 </div>
 
                 <div>
-                  <label className="text-xs font-bold">Pinsp</label>
+                  <label className="text-xs font-bold text-gray-300 flex justify-between">
+                    <span>Pinsp (cmH2O)</span>
+                    <span className="text-red-400">{params.inspiratoryPressure}</span>
+                  </label>
                   <input 
                     type="range"
                     min="5" max="30"
                     value={params.inspiratoryPressure}
                     onChange={(e) => setParams(p => ({ ...p, inspiratoryPressure: Number(e.target.value) }))}
-                    className="w-full"
+                    className="w-full h-2 bg-gray-600 rounded appearance-none cursor-pointer"
                   />
-                  <span className="text-xs text-red-400 font-bold">{params.inspiratoryPressure} cmH2O</span>
                 </div>
 
                 <div>
-                  <label className="text-xs font-bold">RR</label>
+                  <label className="text-xs font-bold text-gray-300 flex justify-between">
+                    <span>RR (/min)</span>
+                    <span className="text-blue-400">{params.respiratoryRate}</span>
+                  </label>
                   <input 
                     type="range"
                     min="6" max="40"
                     value={params.respiratoryRate}
                     onChange={(e) => setParams(p => ({ ...p, respiratoryRate: Number(e.target.value) }))}
-                    className="w-full"
+                    className="w-full h-2 bg-gray-600 rounded appearance-none cursor-pointer"
                   />
-                  <span className="text-xs font-bold">{params.respiratoryRate} /min</span>
                 </div>
 
                 <div>
-                  <label className="text-xs font-bold">Ti</label>
+                  <label className="text-xs font-bold text-gray-300 flex justify-between">
+                    <span>Ti (sec)</span>
+                    <span className="text-yellow-400">{params.inspiratoryTime.toFixed(2)}</span>
+                  </label>
                   <input 
                     type="range"
                     min="0.3" max="2.0" step="0.1"
                     value={params.inspiratoryTime}
                     onChange={(e) => setParams(p => ({ ...p, inspiratoryTime: Number(e.target.value) }))}
-                    className="w-full"
+                    className="w-full h-2 bg-gray-600 rounded appearance-none cursor-pointer"
                   />
-                  <span className="text-xs font-bold">{params.inspiratoryTime.toFixed(2)}s</span>
                 </div>
 
                 <div>
-                  <label className="text-xs font-bold">PEEP</label>
+                  <label className="text-xs font-bold text-gray-300 flex justify-between">
+                    <span>PEEP (cmH2O)</span>
+                    <span className="text-purple-400">{params.peep}</span>
+                  </label>
                   <input 
                     type="range"
                     min="0" max="20"
                     value={params.peep}
                     onChange={(e) => setParams(p => ({ ...p, peep: Number(e.target.value) }))}
-                    className="w-full"
+                    className="w-full h-2 bg-gray-600 rounded appearance-none cursor-pointer"
                   />
-                  <span className="text-xs font-bold">{params.peep} cmH2O</span>
                 </div>
 
                 <div>
-                  <label className="text-xs font-bold">FiO2</label>
+                  <label className="text-xs font-bold text-gray-300 flex justify-between">
+                    <span>FiO2 (%)</span>
+                    <span className="text-green-400">{Math.round(params.fiO2 * 100)}</span>
+                  </label>
                   <input 
                     type="range"
                     min="21" max="100"
                     value={params.fiO2 * 100}
                     onChange={(e) => setParams(p => ({ ...p, fiO2: Number(e.target.value) / 100 }))}
-                    className="w-full"
+                    className="w-full h-2 bg-gray-600 rounded appearance-none cursor-pointer"
                   />
-                  <span className="text-xs font-bold">{(params.fiO2 * 100).toFixed(0)}%</span>
                 </div>
               </div>
             </div>
 
-            <div className="bg-gray-800 rounded-lg p-4 border border-gray-600">
-              <h3 className="flex items-center gap-2 font-bold mb-3 text-sm">
-                <BarChart2 size={16} /> Monitored Values
+            {/* Monitoring */}
+            <div className="bg-gray-800 rounded-lg p-4 border border-gray-600 shadow-lg">
+              <h3 className="flex items-center gap-2 font-bold mb-3 text-base">
+                <BarChart2 size={18} /> Monitored Values
               </h3>
 
-              <div className="space-y-2 text-sm">
-                <div className="flex justify-between">
-                  <span>P-Plat</span>
+              <div className="space-y-2 text-xs">
+                <div className="flex justify-between py-1 border-b border-gray-700">
+                  <span className="text-gray-400">P-Plateau</span>
                   <span className="font-bold text-red-400">{monitoredValues.Pplat} cmH2O</span>
                 </div>
-                <div className="flex justify-between">
-                  <span>Paw-mean</span>
+                <div className="flex justify-between py-1 border-b border-gray-700">
+                  <span className="text-gray-400">Paw-mean</span>
                   <span className="font-bold text-yellow-400">{monitoredValues.Pmean} cmH2O</span>
                 </div>
-                <div className="flex justify-between">
-                  <span>RR Total</span>
-                  <span className="font-bold">{monitoredValues.TotalRR} /min</span>
+                <div className="flex justify-between py-1 border-b border-gray-700">
+                  <span className="text-gray-400">RR Total</span>
+                  <span className="font-bold text-blue-400">{monitoredValues.TotalRR} /min</span>
                 </div>
-                <div className="flex justify-between">
-                  <span>MV</span>
-                  <span className="font-bold text-green-400">{monitoredValues.MV} L/min</span>
+                <div className="flex justify-between py-1 border-b border-gray-700">
+                  <span className="text-gray-400">MV</span>
+                  <span className="font-bold text-green-400">{monitoredValues.MV.toFixed(1)} L/min</span>
                 </div>
-                <div className="flex justify-between">
-                  <span>Cstat</span>
-                  <span className="font-bold text-purple-400">{monitoredValues.Cstat} ml/cmH2O</span>
+                <div className="flex justify-between py-1 border-b border-gray-700">
+                  <span className="text-gray-400">Vt (Exp)</span>
+                  <span className="font-bold text-cyan-400">{monitoredValues.VtExp} ml</span>
                 </div>
-                <div className="flex justify-between">
-                  <span>PEEPI</span>
+                <div className="flex justify-between py-1 border-b border-gray-700">
+                  <span className="text-gray-400">Cstat</span>
+                  <span className="font-bold text-pink-400">{monitoredValues.Cstat} ml/cmH2O</span>
+                </div>
+                <div className="flex justify-between py-1 border-b border-gray-700">
+                  <span className="text-gray-400">PEEPI</span>
                   <span className="font-bold text-orange-400">{monitoredValues.AutoPEEP} cmH2O</span>
                 </div>
-                <div className="flex justify-between">
-                  <span>SpO2</span>
-                  <span className="font-bold text-blue-400">{monitoredValues.SpO2}%</span>
+                <div className="flex justify-between py-1 border-b border-gray-700">
+                  <span className="text-gray-400">SpO2</span>
+                  <span className={`font-bold ${monitoredValues.SpO2 < 90 ? 'text-red-400' : 'text-blue-400'}`}>
+                    {monitoredValues.SpO2}%
+                  </span>
                 </div>
-                <div className="flex justify-between">
-                  <span>EtCO2</span>
+                <div className="flex justify-between py-1">
+                  <span className="text-gray-400">EtCO2</span>
                   <span className="font-bold text-pink-400">{monitoredValues.EtCO2} mmHg</span>
                 </div>
               </div>
             </div>
 
-            <div className="bg-gray-800 rounded-lg p-4 border border-gray-600">
-              <h3 className="flex items-center gap-2 font-bold mb-3 text-sm">
-                <AlertCircle size={16} /> Pathology
+            {/* Pathology */}
+            <div className="bg-gray-800 rounded-lg p-4 border border-gray-600 shadow-lg">
+              <h3 className="flex items-center gap-2 font-bold mb-3 text-base">
+                <AlertCircle size={18} /> Pathology Preset
               </h3>
 
               <select 
                 value={params.pathology}
                 onChange={handlePathologyChange}
-                className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-2 text-sm text-white"
+                className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-2 text-sm text-white hover:border-gray-500"
               >
                 {Object.entries(PATHOLOGY_PRESETS).map(([key, preset]) => (
                   <option key={key} value={key}>{preset.name}</option>
                 ))}
               </select>
+
+              <div className="mt-3 text-xs text-gray-400">
+                <p><strong className="text-gray-300">L:</strong> R={params.resL} C={params.compL}</p>
+                <p><strong className="text-gray-300">R:</strong> R={params.resR} C={params.compR}</p>
+                <p className="mt-1"><strong className="text-gray-300">FRC:</strong> {(params.frcOffset * 1000).toFixed(0)} ml</p>
+              </div>
             </div>
           </div>
         </div>
