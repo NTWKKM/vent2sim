@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import ReactDOM from 'react-dom/client';
-import { Play, Pause, Activity, Settings, BarChart2, AlertCircle, TrendingUp, Zap, RefreshCw } from 'lucide-react';
+import { Play, Pause, Activity, Settings, BarChart2, AlertCircle, TrendingUp, Zap } from 'lucide-react';
 import { getDynamicCompliance } from './physics/compliance';
 import { getDynamicResistance } from './physics/resistance';
 import { PATHOLOGY_PRESETS } from './physics/pathologyPresets';
@@ -434,137 +434,141 @@ function App() {
   };
 
   return (
-    <div className="min-h-screen bg-white text-gray-900 p-4">
-      <div className="max-w-7xl mx-auto">
+    <div className="min-h-screen bg-white text-gray-900 p-3">
+      <div className="w-full">
         {/* HEADER */}
-        <header className="flex justify-between items-center mb-6 pb-4 border-b border-gray-200">
+        <header className="flex justify-between items-center mb-4 pb-3 border-b border-gray-200">
           <div className="flex items-center gap-3">
-            <Activity className="h-7 w-7 text-blue-600" />
+            <Activity className="h-6 w-6 text-blue-600" />
             <div>
-              <h1 className="text-3xl font-bold">VentSim <span className="text-blue-600">Dual-Lung</span></h1>
-              <p className="text-sm text-gray-500">VCV/PCV/PSV with Dual-Lung Pathology Simulation</p>
+              <h1 className="text-2xl font-bold">VentSim <span className="text-blue-600">Dual-Lung</span></h1>
+              <p className="text-xs text-gray-500">VCV/PCV/PSV Mode Simulator</p>
             </div>
           </div>
 
           <button
             onClick={() => setIsRunning(!isRunning)}
-            className={`flex items-center gap-2 px-6 py-2.5 rounded-full font-bold transition text-base ${
+            className={`flex items-center gap-2 px-5 py-2 rounded-full font-bold transition text-sm ${
               isRunning 
                 ? 'bg-red-600 hover:bg-red-700 text-white shadow-lg' 
                 : 'bg-green-600 hover:bg-green-700 text-white shadow-lg'
             }`}
           >
-            {isRunning ? <Pause size={18} /> : <Play size={18} />}
+            {isRunning ? <Pause size={16} /> : <Play size={16} />}
             {isRunning ? 'STOP' : 'START'}
           </button>
         </header>
 
-        {/* MAIN CONTENT */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
-          {/* WAVEFORMS - FULL WIDTH TOP */}
-          <div className="lg:col-span-3 bg-white rounded-lg p-4 border border-gray-200 shadow-sm">
-            <h2 className="flex items-center gap-2 font-bold mb-3 text-lg">
-              <TrendingUp size={20} className="text-blue-600" /> Real-time Waveforms
-            </h2>
-            
-            <div className="space-y-2">
-              <div className="bg-gray-900 rounded border border-gray-300 p-2">
-                <canvas ref={canvasRefP} width={1000} height={120} className="w-full" />
-              </div>
-              <div className="bg-gray-900 rounded border border-gray-300 p-2">
-                <canvas ref={canvasRefF} width={1000} height={120} className="w-full" />
-              </div>
-              <div className="bg-gray-900 rounded border border-gray-300 p-2">
-                <canvas ref={canvasRefV} width={1000} height={120} className="w-full" />
+        {/* DESKTOP LAYOUT: Left (Waveforms/Loops/Monitor) + Right (Controls) */}
+        <div className="grid grid-cols-1 xl:grid-cols-5 gap-3">
+          {/* LEFT SECTION: 3 cols - Waveforms + Loops + Monitor */}
+          <div className="xl:col-span-3 space-y-3">
+            {/* WAVEFORMS */}
+            <div className="bg-white rounded-lg p-3 border border-gray-200 shadow-sm">
+              <h2 className="flex items-center gap-2 font-bold mb-2 text-sm">
+                <TrendingUp size={16} className="text-blue-600" /> Waveforms
+              </h2>
+              
+              <div className="space-y-1">
+                <div className="bg-gray-900 rounded border border-gray-300 p-1.5">
+                  <canvas ref={canvasRefP} width={900} height={90} className="w-full" />
+                </div>
+                <div className="bg-gray-900 rounded border border-gray-300 p-1.5">
+                  <canvas ref={canvasRefF} width={900} height={90} className="w-full" />
+                </div>
+                <div className="bg-gray-900 rounded border border-gray-300 p-1.5">
+                  <canvas ref={canvasRefV} width={900} height={90} className="w-full" />
+                </div>
               </div>
             </div>
-          </div>
 
-          {/* MONITORED VALUES + LOOPS */}
-          <div className="lg:col-span-2 space-y-4">
-            {/* Monitored Values */}
-            <div className="bg-white rounded-lg p-4 border border-gray-200 shadow-sm">
-              <h3 className="flex items-center gap-2 font-bold mb-3 text-base">
-                <BarChart2 size={18} className="text-blue-600" /> Monitored Values
+            {/* LOOPS */}
+            <div className="grid grid-cols-2 gap-3">
+              <div className="bg-white rounded-lg p-3 border border-gray-200 shadow-sm">
+                <h3 className="text-xs font-bold mb-1.5 text-blue-600">P-V Loop</h3>
+                <canvas ref={canvasRefPV} width={320} height={180} className="w-full bg-gray-900 rounded" />
+              </div>
+              <div className="bg-white rounded-lg p-3 border border-gray-200 shadow-sm">
+                <h3 className="text-xs font-bold mb-1.5 text-green-600">F-V Loop</h3>
+                <canvas ref={canvasRefFV} width={320} height={180} className="w-full bg-gray-900 rounded" />
+              </div>
+            </div>
+
+            {/* MONITORED VALUES - 6 boxes per row */}
+            <div className="bg-white rounded-lg p-3 border border-gray-200 shadow-sm">
+              <h3 className="flex items-center gap-2 font-bold mb-2 text-sm">
+                <BarChart2 size={16} className="text-blue-600" /> Monitor
               </h3>
 
-              <div className="grid grid-cols-3 gap-3">
-                <div className="bg-red-50 p-3 rounded-lg border border-red-100">
-                  <p className="text-xs text-gray-600">P-Plateau</p>
-                  <p className="text-2xl font-bold text-red-600">{monitoredValues.Pplat}</p>
+              <div className="grid grid-cols-6 gap-2">
+                <div className="bg-red-50 p-2.5 rounded border border-red-100">
+                  <p className="text-xs text-gray-600">P-Plat</p>
+                  <p className="text-lg font-bold text-red-600">{monitoredValues.Pplat}</p>
                   <p className="text-xs text-gray-500">cmH2O</p>
                 </div>
-                <div className="bg-yellow-50 p-3 rounded-lg border border-yellow-100">
+                <div className="bg-yellow-50 p-2.5 rounded border border-yellow-100">
                   <p className="text-xs text-gray-600">Paw-mean</p>
-                  <p className="text-2xl font-bold text-yellow-600">{monitoredValues.Pmean}</p>
+                  <p className="text-lg font-bold text-yellow-600">{monitoredValues.Pmean}</p>
                   <p className="text-xs text-gray-500">cmH2O</p>
                 </div>
-                <div className="bg-blue-50 p-3 rounded-lg border border-blue-100">
+                <div className="bg-blue-50 p-2.5 rounded border border-blue-100">
                   <p className="text-xs text-gray-600">RR Total</p>
-                  <p className="text-2xl font-bold text-blue-600">{monitoredValues.TotalRR}</p>
+                  <p className="text-lg font-bold text-blue-600">{monitoredValues.TotalRR}</p>
                   <p className="text-xs text-gray-500">/min</p>
                 </div>
-                <div className="bg-green-50 p-3 rounded-lg border border-green-100">
-                  <p className="text-xs text-gray-600">MV (Exp.)</p>
-                  <p className="text-2xl font-bold text-green-600">{monitoredValues.MV.toFixed(1)}</p>
+                <div className="bg-green-50 p-2.5 rounded border border-green-100">
+                  <p className="text-xs text-gray-600">MV</p>
+                  <p className="text-lg font-bold text-green-600">{monitoredValues.MV.toFixed(1)}</p>
                   <p className="text-xs text-gray-500">L/min</p>
                 </div>
-                <div className="bg-cyan-50 p-3 rounded-lg border border-cyan-100">
-                  <p className="text-xs text-gray-600">Vt (Exp)</p>
-                  <p className="text-2xl font-bold text-cyan-600">{monitoredValues.VtExp}</p>
+                <div className="bg-cyan-50 p-2.5 rounded border border-cyan-100">
+                  <p className="text-xs text-gray-600">Vt</p>
+                  <p className="text-lg font-bold text-cyan-600">{monitoredValues.VtExp}</p>
                   <p className="text-xs text-gray-500">ml</p>
                 </div>
-                <div className="bg-purple-50 p-3 rounded-lg border border-purple-100">
+                <div className="bg-purple-50 p-2.5 rounded border border-purple-100">
                   <p className="text-xs text-gray-600">Cstat</p>
-                  <p className="text-2xl font-bold text-purple-600">{monitoredValues.Cstat}</p>
+                  <p className="text-lg font-bold text-purple-600">{monitoredValues.Cstat}</p>
                   <p className="text-xs text-gray-500">ml/cmH2O</p>
                 </div>
-                <div className="bg-orange-50 p-3 rounded-lg border border-orange-100">
+              </div>
+
+              {/* Second row of monitor values */}
+              <div className="grid grid-cols-3 gap-2 mt-2">
+                <div className="bg-orange-50 p-2.5 rounded border border-orange-100">
                   <p className="text-xs text-gray-600">PEEPI</p>
-                  <p className="text-2xl font-bold text-orange-600">{monitoredValues.AutoPEEP}</p>
+                  <p className="text-lg font-bold text-orange-600">{monitoredValues.AutoPEEP}</p>
                   <p className="text-xs text-gray-500">cmH2O</p>
                 </div>
-                <div className={`p-3 rounded-lg border ${monitoredValues.SpO2 < 90 ? 'bg-red-50 border-red-100' : 'bg-blue-50 border-blue-100'}`}>
-                  <p className="text-xs text-gray-600">SpO2 (Est.)</p>
-                  <p className={`text-2xl font-bold ${monitoredValues.SpO2 < 90 ? 'text-red-600' : 'text-blue-600'}`}>{monitoredValues.SpO2}</p>
+                <div className={`p-2.5 rounded border ${monitoredValues.SpO2 < 90 ? 'bg-red-50 border-red-100' : 'bg-cyan-50 border-cyan-100'}`}>
+                  <p className="text-xs text-gray-600">SpO2</p>
+                  <p className={`text-lg font-bold ${monitoredValues.SpO2 < 90 ? 'text-red-600' : 'text-cyan-600'}`}>{monitoredValues.SpO2}</p>
                   <p className="text-xs text-gray-500">%</p>
                 </div>
-                <div className="bg-pink-50 p-3 rounded-lg border border-pink-100">
-                  <p className="text-xs text-gray-600">EtCO2 (Est.)</p>
-                  <p className="text-2xl font-bold text-pink-600">{monitoredValues.EtCO2}</p>
+                <div className="bg-pink-50 p-2.5 rounded border border-pink-100">
+                  <p className="text-xs text-gray-600">EtCO2</p>
+                  <p className="text-lg font-bold text-pink-600">{monitoredValues.EtCO2}</p>
                   <p className="text-xs text-gray-500">mmHg</p>
                 </div>
               </div>
             </div>
-
-            {/* Loops */}
-            <div className="grid grid-cols-2 gap-3">
-              <div className="bg-white rounded-lg p-3 border border-gray-200 shadow-sm">
-                <h3 className="text-sm font-bold mb-2">P-V Loop</h3>
-                <canvas ref={canvasRefPV} width={300} height={200} className="w-full bg-gray-900 rounded" />
-              </div>
-              <div className="bg-white rounded-lg p-3 border border-gray-200 shadow-sm">
-                <h3 className="text-sm font-bold mb-2">F-V Loop</h3>
-                <canvas ref={canvasRefFV} width={300} height={200} className="w-full bg-gray-900 rounded" />
-              </div>
-            </div>
           </div>
 
-          {/* CONTROLS - 1/3 WIDTH */}
-          <div className="space-y-4">
-            {/* Ventilator Settings */}
-            <div className="bg-white rounded-lg p-4 border border-gray-200 shadow-sm">
-              <h3 className="flex items-center gap-2 font-bold mb-3 text-base">
-                <Settings size={18} className="text-blue-600" /> Ventilator Settings
+          {/* RIGHT SECTION: 2 cols - Controls */}
+          <div className="xl:col-span-2 space-y-3">
+            {/* VENTILATOR SETTINGS */}
+            <div className="bg-white rounded-lg p-3 border border-gray-200 shadow-sm">
+              <h3 className="flex items-center gap-2 font-bold mb-2 text-sm">
+                <Settings size={16} className="text-blue-600" /> Settings
               </h3>
 
-              <div className="space-y-3 text-sm">
+              <div className="space-y-2 text-xs">
                 <div>
-                  <label className="text-xs font-bold text-gray-700">Mode</label>
+                  <label className="font-bold text-gray-700 block mb-0.5">Mode</label>
                   <select 
                     value={params.mode}
                     onChange={(e) => setParams(p => ({ ...p, mode: e.target.value }))}
-                    className="w-full bg-white border border-gray-300 rounded px-2 py-1.5 text-sm text-gray-900 hover:border-gray-400"
+                    className="w-full bg-white border border-gray-300 rounded px-2 py-1 text-xs text-gray-900"
                   >
                     <option>VCV</option>
                     <option>PCV</option>
@@ -573,8 +577,8 @@ function App() {
                 </div>
 
                 <div>
-                  <label className="text-xs font-bold text-gray-700 flex justify-between">
-                    <span>Pinsp (cmH2O)</span>
+                  <label className="font-bold text-gray-700 flex justify-between mb-0.5">
+                    <span>Pinsp</span>
                     <span className="text-red-600">{params.inspiratoryPressure}</span>
                   </label>
                   <input 
@@ -582,13 +586,13 @@ function App() {
                     min="5" max="30"
                     value={params.inspiratoryPressure}
                     onChange={(e) => setParams(p => ({ ...p, inspiratoryPressure: Number(e.target.value) }))}
-                    className="w-full h-2 bg-gray-300 rounded appearance-none cursor-pointer"
+                    className="w-full h-1.5 bg-gray-300 rounded"
                   />
                 </div>
 
                 <div>
-                  <label className="text-xs font-bold text-gray-700 flex justify-between">
-                    <span>RR (/min)</span>
+                  <label className="font-bold text-gray-700 flex justify-between mb-0.5">
+                    <span>RR</span>
                     <span className="text-blue-600">{params.respiratoryRate}</span>
                   </label>
                   <input 
@@ -596,13 +600,13 @@ function App() {
                     min="6" max="40"
                     value={params.respiratoryRate}
                     onChange={(e) => setParams(p => ({ ...p, respiratoryRate: Number(e.target.value) }))}
-                    className="w-full h-2 bg-gray-300 rounded appearance-none cursor-pointer"
+                    className="w-full h-1.5 bg-gray-300 rounded"
                   />
                 </div>
 
                 <div>
-                  <label className="text-xs font-bold text-gray-700 flex justify-between">
-                    <span>Ti (sec)</span>
+                  <label className="font-bold text-gray-700 flex justify-between mb-0.5">
+                    <span>Ti</span>
                     <span className="text-yellow-600">{params.inspiratoryTime.toFixed(2)}</span>
                   </label>
                   <input 
@@ -610,13 +614,13 @@ function App() {
                     min="0.3" max="2.0" step="0.1"
                     value={params.inspiratoryTime}
                     onChange={(e) => setParams(p => ({ ...p, inspiratoryTime: Number(e.target.value) }))}
-                    className="w-full h-2 bg-gray-300 rounded appearance-none cursor-pointer"
+                    className="w-full h-1.5 bg-gray-300 rounded"
                   />
                 </div>
 
                 <div>
-                  <label className="text-xs font-bold text-gray-700 flex justify-between">
-                    <span>PEEP (cmH2O)</span>
+                  <label className="font-bold text-gray-700 flex justify-between mb-0.5">
+                    <span>PEEP</span>
                     <span className="text-purple-600">{params.peep}</span>
                   </label>
                   <input 
@@ -624,66 +628,66 @@ function App() {
                     min="0" max="20"
                     value={params.peep}
                     onChange={(e) => setParams(p => ({ ...p, peep: Number(e.target.value) }))}
-                    className="w-full h-2 bg-gray-300 rounded appearance-none cursor-pointer"
+                    className="w-full h-1.5 bg-gray-300 rounded"
                   />
                 </div>
 
                 <div>
-                  <label className="text-xs font-bold text-gray-700 flex justify-between">
-                    <span>FiO2 (%)</span>
-                    <span className="text-green-600">{Math.round(params.fiO2 * 100)}</span>
+                  <label className="font-bold text-gray-700 flex justify-between mb-0.5">
+                    <span>FiO2</span>
+                    <span className="text-green-600">{Math.round(params.fiO2 * 100)}%</span>
                   </label>
                   <input 
                     type="range"
                     min="21" max="100"
                     value={params.fiO2 * 100}
                     onChange={(e) => setParams(p => ({ ...p, fiO2: Number(e.target.value) / 100 }))}
-                    className="w-full h-2 bg-gray-300 rounded appearance-none cursor-pointer"
+                    className="w-full h-1.5 bg-gray-300 rounded"
                   />
                 </div>
               </div>
             </div>
 
-            {/* Tools & Maneuvers */}
-            <div className="bg-gradient-to-br from-blue-50 to-cyan-50 rounded-lg p-4 border border-blue-200 shadow-sm">
-              <h3 className="flex items-center gap-2 font-bold mb-3 text-base text-blue-900">
-                <Zap size={18} /> Tools / Maneuvers
+            {/* TOOLS */}
+            <div className="bg-blue-50 rounded-lg p-3 border border-blue-200 shadow-sm">
+              <h3 className="flex items-center gap-2 font-bold mb-2 text-sm text-blue-900">
+                <Zap size={16} /> Tools
               </h3>
-              <button className="w-full bg-white border border-blue-300 text-blue-700 font-semibold py-2 rounded-lg hover:bg-blue-50 transition">
-                Start Recruitment (30/40 cmH2O)
+              <button className="w-full bg-white border border-blue-300 text-blue-700 text-xs font-semibold py-1.5 rounded hover:bg-blue-50">
+                Recruitment
               </button>
             </div>
 
-            {/* Pathology */}
-            <div className="bg-white rounded-lg p-4 border border-gray-200 shadow-sm">
-              <h3 className="flex items-center gap-2 font-bold mb-3 text-base">
-                <AlertCircle size={18} className="text-orange-600" /> Pathology Preset
+            {/* PATHOLOGY */}
+            <div className="bg-white rounded-lg p-3 border border-gray-200 shadow-sm">
+              <h3 className="flex items-center gap-2 font-bold mb-2 text-sm">
+                <AlertCircle size={16} className="text-orange-600" /> Pathology
               </h3>
 
               <select 
                 value={params.pathology}
                 onChange={handlePathologyChange}
-                className="w-full bg-white border border-gray-300 rounded px-2 py-2 text-sm text-gray-900 hover:border-gray-400"
+                className="w-full bg-white border border-gray-300 rounded px-2 py-1 text-xs text-gray-900 mb-2"
               >
                 {Object.entries(PATHOLOGY_PRESETS).map(([key, preset]) => (
                   <option key={key} value={key}>{preset.name}</option>
                 ))}
               </select>
 
-              <div className="mt-3 p-3 bg-gray-50 rounded text-xs text-gray-700 border border-gray-200">
-                <div className="grid grid-cols-2 gap-2">
+              <div className="p-2 bg-gray-50 rounded text-xs text-gray-700 border border-gray-200">
+                <div className="grid grid-cols-2 gap-1 mb-1">
                   <div>
-                    <p className="font-bold text-gray-800">Left Lung</p>
-                    <p>R: {params.resL} cmH2O/(L/s)</p>
-                    <p>C: {params.compL} ml/cmH2O</p>
+                    <p className="font-bold text-xs">Left</p>
+                    <p>R: {params.resL}</p>
+                    <p>C: {params.compL}</p>
                   </div>
                   <div>
-                    <p className="font-bold text-gray-800">Right Lung</p>
-                    <p>R: {params.resR} cmH2O/(L/s)</p>
-                    <p>C: {params.compR} ml/cmH2O</p>
+                    <p className="font-bold text-xs">Right</p>
+                    <p>R: {params.resR}</p>
+                    <p>C: {params.compR}</p>
                   </div>
                 </div>
-                <p className="mt-2 text-gray-600"><strong>FRC:</strong> {(params.frcOffset * 1000).toFixed(0)} ml</p>
+                <p><strong>FRC:</strong> {(params.frcOffset * 1000).toFixed(0)} ml</p>
               </div>
             </div>
           </div>
