@@ -5,27 +5,12 @@ import { getDynamicCompliance } from './physics/compliance';
 import { getDynamicResistance } from './physics/resistance';
 import { PATHOLOGY_PRESETS } from './physics/pathologyPresets';
 
-// ===== PHYSICS CONSTANTS =====
 const DT = 0.016;
 const MAX_HISTORY = 1500;
 const PEAK_WINDOW = 300;
-const PCV_RISE_SMOOTHING = 0.08;
-const EXP_RESISTANCE_MULTIPLIER = 1.2;
-const CIRCUIT_COMPLIANCE = 2.5;
 
-// ===== HELPER FUNCTIONS =====
 const lerp = (start, end, factor) => start + (end - start) * factor;
 
-const calculatePBW = (gender, heightCm) => {
-  const heightInches = heightCm * 0.393701;
-  if (gender === 'M') {
-    return 50 + 2.3 * (heightInches - 60);
-  } else {
-    return 45.5 + 2.3 * (heightInches - 60);
-  }
-};
-
-// ===== MAIN APP =====
 function App() {
   const [params, setParams] = useState({
     mode: 'PCV',
@@ -118,95 +103,116 @@ function App() {
       s.cycleTime += DT;
     }
 
-    const CL_dynamic = getDynamicCompliance(s.volL, p.compL, p.pathology, s.phase, p.lungCapacity);
-    const CR_dynamic = getDynamicCompliance(s.volR, p.compR, p.pathology, s.phase, p.lungCapacity);
-    const RL_dynamic = getDynamicResistance(p.resL, s.flowL, s.volL, p.pathology);
-    const RR_dynamic = getDynamicResistance(p.resR, s.flowR, s.volR, p.pathology);
+    try {
+      const CL_dynamic = getDynamicCompliance(s.volL, p.compL, p.pathology, s.phase, p.lungCapacity);
+      const CR_dynamic = getDynamicCompliance(s.volR, p.compR, p.pathology, s.phase, p.lungCapacity);
+      const RL_dynamic = getDynamicResistance(p.resL, s.flowL, s.volL, p.pathology);
+      const RR_dynamic = getDynamicResistance(p.resR, s.flowR, s.volR, p.pathology);
 
-    const V_Absolute_L_Current = s.volL + s.volR;
-    const V_Relative_mL_Current = Math.max(0, (V_Absolute_L_Current * 1000) - ((p.peep * (p.compL + p.compR)) + (p.frcOffset * 1000)));
+      const V_Absolute_L_Current = s.volL + s.volR;
+      const V_Relative_mL_Current = Math.max(0, (V_Absolute_L_Current * 1000) - ((p.peep * (p.compL + p.compR)) + (p.frcOffset * 1000)));
 
-    let triggerBreath = false;
-
-    if (s.cycleTime >= d.cycleDuration) {
-      triggerBreath = true;
-    }
-
-    if (triggerBreath && s.phase !== 'INS') {
-      const now = Date.now();
-      if (s.lastBreathTime > 0) {
-        const breathDurMs = now - s.lastBreathTime;
-        if (breathDurMs > 500) {
-          const instantRR = 60000 / breathDurMs;
-          setMonitoredValues(m => ({ ...m, TotalRR: instantRR }));
-        }
+      let triggerBreath = false;
+      if (s.cycleTime >= d.cycleDuration) {
+        triggerBreath = true;
       }
-      s.lastBreathTime = now;
-      s.phase = 'INS';
-      s.cycleTime = 0;
-      s.volPeakCycle = (s.volL + s.volR) * 1000;
-    }
 
-    const PelL = s.volL / CL_dynamic;
-    const PelR = s.volR / CR_dynamic;
-    const PalvL = PelL;
-    const PalvR = PelR;
+      if (triggerBreath && s.phase !== 'INS') {
+        const now = Date.now();
+        if (s.lastBreathTime > 0) {
+          const breathDurMs = now - s.lastBreathTime;
+          if (breathDurMs > 500) {
+            const instantRR = 60000 / breathDurMs;
+            const Vt_Final_mL = Math.max(0, s.volPeakCycle - ((s.volL + s.volR) * 1000));
+            const MV_val = (instantRR * Vt_Final_mL) / 1000;
+            const drivingP = Math.max(1, s.pPlatTemp - p.peep);
+            const cstat = Vt_Final_mL / drivingP;
 
-    let currentPaw = p.peep;
-    const RL = RL_dynamic * (s.phase === 'EXP' ? EXP_RESISTANCE_MULTIPLIER : 1);
-    const RR = RR_dynamic * (s.phase === 'EXP' ? EXP_RESISTANCE_MULTIPLIER : 1);
-
-    if (s.phase === 'INS') {
-      if (p.mode === 'VCV') {
-        if (V_Relative_mL_Current >= p.tidalVolume) {
-          s.phase = 'EXP';
+            setMonitoredValues(m => ({
+              ...m,
+              TotalRR: Math.round(instantRR * 10) / 10,
+              MV: Math.round(MV_val * 100) / 100,
+              VtExp: Math.round(Vt_Final_mL),
+              Cstat: Math.round(cstat * 10) / 10,
+              Pplat: Math.round(s.pPlatTemp * 10) / 10,
+              Pmean: Math.round((s.pawSum / Math.max(1, s.pawCount)) * 10) / 10
+            }));
+          }
         }
-      } else if (p.mode === 'PCV') {
-        currentPaw = p.inspiratoryPressure + p.peep;
-        if (s.cycleTime >= d.inspDuration) {
-          s.phase = 'EXP';
-        }
+        s.lastBreathTime = now;
+        s.phase = 'INS';
+        s.cycleTime = 0;
+        s.volPeakCycle = (s.volL + s.volR) * 1000;
+        s.pawSum = 0;
+        s.pawCount = 0;
       }
-    } else {
-      s.phase = 'EXP';
-      currentPaw = p.peep;
+
+      const PelL = s.volL / CL_dynamic;
+      const PelR = s.volR / CR_dynamic;
+      const PalvL = PelL;
+      const PalvR = PelR;
+
+      let currentPaw = p.peep;
+      const RL = RL_dynamic * (s.phase === 'EXP' ? 1.2 : 1);
+      const RR = RR_dynamic * (s.phase === 'EXP' ? 1.2 : 1);
+
+      if (s.phase === 'INS') {
+        if (p.mode === 'VCV') {
+          if (V_Relative_mL_Current >= p.tidalVolume) {
+            s.phase = 'EXP';
+          }
+        } else if (p.mode === 'PCV') {
+          currentPaw = p.inspiratoryPressure + p.peep;
+          if (s.cycleTime >= d.inspDuration) {
+            s.phase = 'EXP';
+            s.pPlatTemp = (PelL + PelR) / 2 + p.peep;
+          }
+        }
+      } else {
+        s.phase = 'EXP';
+        currentPaw = p.peep;
+      }
+
+      s.flowL = (currentPaw - PalvL) / RL;
+      s.flowR = (currentPaw - PalvR) / RR;
+      s.flowTotal = s.flowL + s.flowR;
+      s.paw = currentPaw;
+      s.volL += s.flowL * DT;
+      s.volR += s.flowR * DT;
+
+      if (s.volL < 0) s.volL = 0;
+      if (s.volR < 0) s.volR = 0;
+
+      const V_Absolute_mL = (s.volL + s.volR) * 1000;
+      s.pawSum += s.paw;
+      s.pawCount += 1;
+
+      if (s.phase === 'INS') {
+        s.volPeakCycle = Math.max(s.volPeakCycle, V_Absolute_mL);
+      }
+
+      history.current.paw.push(s.paw);
+      history.current.flow.push(s.flowTotal * 60);
+      history.current.flowL.push(s.flowL * 60);
+      history.current.flowR.push(s.flowR * 60);
+      history.current.vol.push(V_Relative_mL_Current);
+
+      history.current.currentLoopPV.push({ p: s.paw, v: V_Relative_mL_Current });
+      history.current.currentLoopFV.push({ f: s.flowTotal * 60, v: V_Relative_mL_Current });
+
+      if (history.current.paw.length > MAX_HISTORY) {
+        history.current.paw.shift();
+        history.current.flow.shift();
+        history.current.flowL.shift();
+        history.current.flowR.shift();
+        history.current.vol.shift();
+      }
+
+      s.timeSinceLastBreath += DT;
+      s.patientTime += DT;
+    } catch (e) {
+      console.error('Physics error:', e);
     }
-
-    s.flowL = (currentPaw - PalvL) / RL;
-    s.flowR = (currentPaw - PalvR) / RR;
-    s.flowTotal = s.flowL + s.flowR;
-    s.paw = currentPaw;
-    s.volL += s.flowL * DT;
-    s.volR += s.flowR * DT;
-
-    if (s.volL < 0) s.volL = 0;
-    if (s.volR < 0) s.volR = 0;
-
-    const V_Absolute_mL = (s.volL + s.volR) * 1000;
-    s.pawSum += s.paw;
-    s.pawCount += 1;
-
-    if (s.phase === 'INS') {
-      s.volPeakCycle = Math.max(s.volPeakCycle, V_Absolute_mL);
-    }
-
-    history.current.paw.push(s.paw);
-    history.current.flow.push(s.flowTotal * 60);
-    history.current.flowL.push(s.flowL * 60);
-    history.current.flowR.push(s.flowR * 60);
-    history.current.vol.push(V_Relative_mL_Current);
-
-    if (history.current.paw.length > MAX_HISTORY) {
-      history.current.paw.shift();
-      history.current.flow.shift();
-      history.current.flowL.shift();
-      history.current.flowR.shift();
-      history.current.vol.shift();
-    }
-
-    s.timeSinceLastBreath += DT;
-    s.patientTime += DT;
-
   }, [isRunning, params, derivedParams]);
 
   const updateAutoScales = useCallback(() => {
@@ -227,13 +233,12 @@ function App() {
     const diffV = Math.abs(scalesRef.current.vMax - displayedScalesRef.current.vMax);
 
     if (diffP > 1 || diffF > 2 || diffV > 10) {
-      const newScales = {
+      setScales({
         pMax: scalesRef.current.pMax,
         fMax: scalesRef.current.fMax,
         vMax: scalesRef.current.vMax
-      };
-      setScales(newScales);
-      displayedScalesRef.current = newScales;
+      });
+      displayedScalesRef.current = { ...scalesRef.current };
     }
   }, []);
 
@@ -245,13 +250,9 @@ function App() {
 
     updateAutoScales();
 
-    const w = ctxP.canvas.width;
-    const h = ctxP.canvas.height;
-    ctxP.clearRect(0, 0, w, h);
-    ctxF.clearRect(0, 0, w, h);
-    ctxV.clearRect(0, 0, w, h);
-
     const drawLine = (ctx, data, color, yMax, midY = false) => {
+      const w = ctx.canvas.width;
+      const h = ctx.canvas.height;
       ctx.beginPath();
       ctx.strokeStyle = color;
       ctx.lineWidth = 2;
@@ -270,39 +271,94 @@ function App() {
       ctx.stroke();
     };
 
-    // Pressure
+    // Clear & draw Pressure
+    const w = ctxP.canvas.width;
+    const h = ctxP.canvas.height;
+    ctxP.fillStyle = '#1f2937';
+    ctxP.fillRect(0, 0, w, h);
     ctxP.fillStyle = '#f59e0b';
     ctxP.font = '12px sans-serif';
     ctxP.fillText('Paw (cmH2O)', 50, 20);
     ctxP.fillText('PEAK: ' + Math.max(...history.current.paw).toFixed(1), w - 120, 20);
-    drawLine(ctxP, history.current.paw, '#f59e0b', scalesRef.current.pMax);
+    drawLine(ctxP, history.current.paw, '#f59e0b', scales.pMax);
 
-    // Flow
+    // Clear & draw Flow
+    ctxF.fillStyle = '#1f2937';
+    ctxF.fillRect(0, 0, w, h);
     ctxF.fillStyle = '#10b981';
     ctxF.font = '12px sans-serif';
     ctxF.fillText('Flow (L/min)', 50, 20);
-    ctxF.fillText('SCALE: ' + scalesRef.current.fMax.toFixed(1) + ' L/min', w - 150, 20);
-    drawLine(ctxF, history.current.flow, '#10b981', scalesRef.current.fMax, true);
+    ctxF.fillText('SCALE: ' + scales.fMax.toFixed(1), w - 150, 20);
+    drawLine(ctxF, history.current.flow, '#10b981', scales.fMax, true);
 
-    // Volume
+    // Clear & draw Volume
+    ctxV.fillStyle = '#1f2937';
+    ctxV.fillRect(0, 0, w, h);
     ctxV.fillStyle = '#3b82f6';
     ctxV.font = '12px sans-serif';
     ctxV.fillText('Volume (ml)', 50, 20);
-    ctxV.fillText('Max (Rel): ' + Math.max(...history.current.vol).toFixed(0), w - 150, 20);
-    drawLine(ctxV, history.current.vol, '#3b82f6', scalesRef.current.vMax);
+    ctxV.fillText('Max: ' + Math.max(...history.current.vol).toFixed(0), w - 150, 20);
+    drawLine(ctxV, history.current.vol, '#3b82f6', scales.vMax);
+  }, [scales, updateAutoScales]);
 
-  }, [updateAutoScales]);
+  const drawLoops = useCallback(() => {
+    const ctxPV = canvasRefPV.current?.getContext('2d');
+    const ctxFV = canvasRefFV.current?.getContext('2d');
+    if (!ctxPV || !ctxFV) return;
+
+    const w = ctxPV.canvas.width;
+    const h = ctxPV.canvas.height;
+
+    // P-V Loop
+    ctxPV.fillStyle = '#1f2937';
+    ctxPV.fillRect(0, 0, w, h);
+    ctxPV.strokeStyle = '#f59e0b';
+    ctxPV.lineWidth = 2;
+    ctxPV.beginPath();
+
+    const pMax = scales.pMax;
+    const vMax = scales.vMax;
+    const px = 40;
+    const py = 20;
+    const pw = w - 60;
+    const ph = h - 40;
+
+    history.current.currentLoopPV.forEach((pt, i) => {
+      const x = px + (pt.p / pMax) * pw;
+      const y = py + ph - (pt.v / vMax) * ph;
+      if (i === 0) ctxPV.moveTo(x, y);
+      else ctxPV.lineTo(x, y);
+    });
+    ctxPV.stroke();
+
+    // F-V Loop
+    ctxFV.fillStyle = '#1f2937';
+    ctxFV.fillRect(0, 0, w, h);
+    ctxFV.strokeStyle = '#10b981';
+    ctxFV.lineWidth = 2;
+    ctxFV.beginPath();
+
+    const fMax = scales.fMax;
+    history.current.currentLoopFV.forEach((pt, i) => {
+      const x = px + (pt.v / vMax) * pw;
+      const y = py + ph / 2 - (pt.f / fMax) * (ph / 2);
+      if (i === 0) ctxFV.moveTo(x, y);
+      else ctxFV.lineTo(x, y);
+    });
+    ctxFV.stroke();
+  }, [scales]);
 
   useEffect(() => {
     let animationFrameId;
     const loop = () => {
       updatePhysics();
       drawWaveforms();
+      drawLoops();
       animationFrameId = requestAnimationFrame(loop);
     };
     loop();
     return () => cancelAnimationFrame(animationFrameId);
-  }, [updatePhysics, drawWaveforms]);
+  }, [updatePhysics, drawWaveforms, drawLoops]);
 
   const handlePathologyChange = (e) => {
     const newPathology = e.target.value;
@@ -324,7 +380,6 @@ function App() {
   return (
     <div className="min-h-screen bg-gray-700 text-white p-4">
       <div className="max-w-7xl mx-auto">
-        {/* HEADER */}
         <header className="flex justify-between items-center mb-6 pb-4 border-b border-gray-600">
           <div className="flex items-center gap-3">
             <Activity className="h-6 w-6 text-blue-400" />
@@ -348,7 +403,6 @@ function App() {
         </header>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-          {/* WAVEFORMS - 2/3 WIDTH */}
           <div className="lg:col-span-2 space-y-3">
             <div className="bg-gray-800 rounded-lg p-4 border border-gray-600">
               <h2 className="flex items-center gap-2 font-bold mb-3 text-sm">
@@ -356,24 +410,18 @@ function App() {
               </h2>
               
               <div className="space-y-2">
-                {/* Pressure */}
                 <div className="bg-gray-900 rounded border border-gray-600 p-2">
                   <canvas ref={canvasRefP} width={800} height={140} className="w-full" />
                 </div>
-
-                {/* Flow */}
                 <div className="bg-gray-900 rounded border border-gray-600 p-2">
                   <canvas ref={canvasRefF} width={800} height={140} className="w-full" />
                 </div>
-
-                {/* Volume */}
                 <div className="bg-gray-900 rounded border border-gray-600 p-2">
                   <canvas ref={canvasRefV} width={800} height={140} className="w-full" />
                 </div>
               </div>
             </div>
 
-            {/* LOOPS */}
             <div className="grid grid-cols-2 gap-3">
               <div className="bg-gray-800 rounded-lg p-3 border border-gray-600">
                 <h3 className="text-xs font-bold mb-2">P-V Loop</h3>
@@ -386,9 +434,7 @@ function App() {
             </div>
           </div>
 
-          {/* CONTROLS - 1/3 WIDTH */}
           <div className="space-y-3">
-            {/* Ventilator Settings */}
             <div className="bg-gray-800 rounded-lg p-4 border border-gray-600">
               <h3 className="flex items-center gap-2 font-bold mb-3 text-sm">
                 <Settings size={16} /> Ventilator Settings
@@ -396,7 +442,7 @@ function App() {
 
               <div className="space-y-3 text-sm">
                 <div>
-                  <label className="text-xs font-bold">Ventilation Mode</label>
+                  <label className="text-xs font-bold">Mode</label>
                   <select 
                     value={params.mode}
                     onChange={(e) => setParams(p => ({ ...p, mode: e.target.value }))}
@@ -409,7 +455,7 @@ function App() {
                 </div>
 
                 <div>
-                  <label className="text-xs font-bold">Inspiratory Pressure (Pinsp)</label>
+                  <label className="text-xs font-bold">Pinsp</label>
                   <input 
                     type="range"
                     min="5" max="30"
@@ -421,7 +467,7 @@ function App() {
                 </div>
 
                 <div>
-                  <label className="text-xs font-bold">Respiratory Rate (RR)</label>
+                  <label className="text-xs font-bold">RR</label>
                   <input 
                     type="range"
                     min="6" max="40"
@@ -433,7 +479,7 @@ function App() {
                 </div>
 
                 <div>
-                  <label className="text-xs font-bold">Inspiratory Time (Ti)</label>
+                  <label className="text-xs font-bold">Ti</label>
                   <input 
                     type="range"
                     min="0.3" max="2.0" step="0.1"
@@ -470,7 +516,6 @@ function App() {
               </div>
             </div>
 
-            {/* Monitoring */}
             <div className="bg-gray-800 rounded-lg p-4 border border-gray-600">
               <h3 className="flex items-center gap-2 font-bold mb-3 text-sm">
                 <BarChart2 size={16} /> Monitored Values
@@ -478,46 +523,43 @@ function App() {
 
               <div className="space-y-2 text-sm">
                 <div className="flex justify-between">
-                  <span>P-Plateau</span>
-                  <span className="font-bold text-red-400">{monitoredValues.Pplat.toFixed(1)} cmH2O</span>
+                  <span>P-Plat</span>
+                  <span className="font-bold text-red-400">{monitoredValues.Pplat} cmH2O</span>
                 </div>
                 <div className="flex justify-between">
                   <span>Paw-mean</span>
-                  <span className="font-bold text-yellow-400">{monitoredValues.Pmean.toFixed(1)} cmH2O</span>
+                  <span className="font-bold text-yellow-400">{monitoredValues.Pmean} cmH2O</span>
                 </div>
                 <div className="flex justify-between">
                   <span>RR Total</span>
-                  <span className="font-bold">{monitoredValues.TotalRR.toFixed(1)} /min</span>
+                  <span className="font-bold">{monitoredValues.TotalRR} /min</span>
                 </div>
                 <div className="flex justify-between">
-                  <span>MV (Exp.)</span>
-                  <span className="font-bold text-green-400">{monitoredValues.MV.toFixed(2)} L/min</span>
+                  <span>MV</span>
+                  <span className="font-bold text-green-400">{monitoredValues.MV} L/min</span>
                 </div>
                 <div className="flex justify-between">
                   <span>Cstat</span>
-                  <span className="font-bold text-purple-400">{monitoredValues.Cstat.toFixed(1)} ml/cmH2O</span>
+                  <span className="font-bold text-purple-400">{monitoredValues.Cstat} ml/cmH2O</span>
                 </div>
                 <div className="flex justify-between">
                   <span>PEEPI</span>
-                  <span className="font-bold text-orange-400">{monitoredValues.AutoPEEP.toFixed(1)} cmH2O</span>
+                  <span className="font-bold text-orange-400">{monitoredValues.AutoPEEP} cmH2O</span>
                 </div>
                 <div className="flex justify-between">
-                  <span>SpO2 (Est.)</span>
-                  <span className="font-bold" style={{color: monitoredValues.SpO2 < 90 ? '#ef4444' : '#3b82f6'}}>
-                    {monitoredValues.SpO2} %
-                  </span>
+                  <span>SpO2</span>
+                  <span className="font-bold text-blue-400">{monitoredValues.SpO2}%</span>
                 </div>
                 <div className="flex justify-between">
-                  <span>EtCO2 (Est.)</span>
+                  <span>EtCO2</span>
                   <span className="font-bold text-pink-400">{monitoredValues.EtCO2} mmHg</span>
                 </div>
               </div>
             </div>
 
-            {/* Pathology */}
             <div className="bg-gray-800 rounded-lg p-4 border border-gray-600">
               <h3 className="flex items-center gap-2 font-bold mb-3 text-sm">
-                <AlertCircle size={16} /> Select Pathology Preset
+                <AlertCircle size={16} /> Pathology
               </h3>
 
               <select 
@@ -529,10 +571,6 @@ function App() {
                   <option key={key} value={key}>{preset.name}</option>
                 ))}
               </select>
-
-              <div className="mt-2 text-xs text-gray-300">
-                <p><strong>L:</strong> R={params.resL} C={params.compL} | <strong>R:</strong> R={params.resR} C={params.compR}</p>
-              </div>
             </div>
           </div>
         </div>
@@ -541,7 +579,6 @@ function App() {
   );
 }
 
-// ===== RENDER =====
 const root = ReactDOM.createRoot(document.getElementById('root'));
 root.render(<App />);
 
