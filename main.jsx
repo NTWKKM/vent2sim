@@ -615,7 +615,11 @@ const App = () => {
         const calcAutoPEEP = Math.max(0, PalvMean - p.peep);
 
         const V_EndExp_mL = (s.volL + s.volR) * 1000;
-        const Vt_Final_mL = Math.max(0, s.volPeakCycle - V_EndExp_mL);
+        const Vt_Final_mL = Math.max(0, s.volPeakCycle - V_EndExp_mL); // Vt Exp
+
+        // NEW LOGIC: VPeakRel should reflect the actual dynamic inspired volume (which equals VtExp in a closed system)
+        // เพื่อแก้ไขความไม่สอดคล้องที่ผู้ใช้พบ (VtExp > VPeakRel)
+        const VPeakRel_Derived = Vt_Final_mL; 
 
         let calculatedCstat = 0;
         const drivingPressure = Math.max(1, s.pPlatTemp - p.peep);
@@ -625,8 +629,11 @@ const App = () => {
         if (calculatedCstat > 200) calculatedCstat = 200;
 
         const VPeakAbs_Measured = s.volPeakCycle;
-        const V_PEEP_Vol_mL = (p.peep * (p.compL + p.compR)) + (p.frcOffset * 1000);
-        const VPeakRel_Derived = Math.max(0, VPeakAbs_Measured - V_PEEP_Vol_mL);
+        // const V_PEEP_Vol_mL = (p.peep * (p.compL + p.compR)) + (p.frcOffset * 1000); // Original baseline for Max(Rel)
+        // const VPeakRel_Derived = Math.max(0, VPeakAbs_Measured - V_PEEP_Vol_mL); // Original calculation
+
+        // NEW LOGIC: VPeakRel (Max Rel) should reflect the actual dynamic inspired volume (which equals VtExp in a closed system)
+        const VPeakRel_Derived = Vt_Final_mL; // <--- CHANGED HERE
 
         // ===== OXYGENATION MODEL (ARDS PEEP/Pplat Influence on Shunt) =====
         const baseShunt = p.shunt;        
@@ -668,7 +675,7 @@ const App = () => {
              MV: (instantRR * Vt_Final_mL) / 1000,
              VtExp: Vt_Final_mL,
              VPeakAbs: VPeakAbs_Measured,
-             VPeakRel: VPeakRel_Derived,
+             VPeakRel: VPeakRel_Derived, // <--- VPeakRel now matches VtExp
              AutoPEEP: calcAutoPEEP,
              Cstat: calculatedCstat,
              Pplat: s.pPlatTemp,
