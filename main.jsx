@@ -79,6 +79,20 @@ const getDynamicCompliance = (currentTotalVol_L, baseC_ml, pathology, phase, lun
         upperInflection_L = lungCapacity_L * 0.6;
         distensionFactor = 25;
         sigFactor = 2.5;
+        // **NEW ARDS PEEP DYNAMIC FACTOR**
+        // PEEP < 8: ปอดแฟบหนัก (Compliance แย่ลง)
+        if (currentPEEP < 8) {
+            peepRecruitmentFactor = 0.6 + (currentPEEP * 0.05); // Min 0.6, max 1.0
+        } 
+        // PEEP 8-15: Optimal Recruitment Zone (Compliance ดีขึ้น)
+        else if (currentPEEP <= 15) {
+            peepRecruitmentFactor = 1.0 + ((currentPEEP - 8) * 0.06); // Max ~1.42
+        } 
+        // PEEP > 15: Overdistension Risk / Recruitment Plateau (Compliance เริ่มลด)
+        else {
+            peepRecruitmentFactor = 1.45 - ((currentPEEP - 15) * 0.05); // เริ่มลดลง
+            peepRecruitmentFactor = Math.max(1.0, peepRecruitmentFactor);
+        }
         break;
       case 'FIBROSIS':
         // Restrictive: Low compliance throughout, early upper inflection
@@ -111,6 +125,12 @@ const getDynamicCompliance = (currentTotalVol_L, baseC_ml, pathology, phase, lun
       const sigmoid = 1 / (1 + Math.exp(-sigFactor * (currentTotalVol_L - midpoint) / (upperInflection_L - lowerInflection_L)));
       effectiveC = baseC_L * (0.4 + 0.6 * sigmoid);
     }
+    // ===== APPLY ARDS PEEP FACTOR =====
+    if (pathology === 'ARDS') {
+        effectiveC *= peepRecruitmentFactor;
+    }
+    // Safety: Minimum compliance 2 ml/cmH2O
+    return Math.max(0.002, effectiveC);
   
     // ===== RECRUITMENT PHASE (Inspiration): Lower Compliance =====
     // Effort to open collapsed alveoli requires additional pressure
@@ -153,11 +173,12 @@ const PATHOLOGY_PRESETS = {
   },
   ARDS: { 
       name: 'ARDS (Stiff Lungs)', 
-      resL: 15, compL: 30, resR: 15, compR: 30, 
+      // เปลี่ยน compL/R เป็น 35 และ lungCapacity เป็น 3.0
+      resL: 15, compL: 35, resR: 15, compR: 35, 
       shunt: 0.30, deadspace: 0.35, 
       frcOffset: 0.0, 
-      lungCapacity: 3.0, // <--- แก้เป็น 3.0 ตามที่ขอครับ (เดิม 1.0)
-      note: 'Low compliance. Adjusted Capacity (3.0L) to avoid early overdistension.' 
+      lungCapacity: 3.0, // <-- แก้ไข: ใช้ค่าที่สมจริงสำหรับ Predicted Value
+      note: 'Low compliance. Optimal PEEP is crucial for recruitment and improving Cstat.' 
   },
   COPD: { 
       name: 'COPD (Mild/Mod)', 
@@ -491,8 +512,8 @@ const App = () => {
     s.timeSinceLastBreath += DT;
     
     // ===== LUNG MECHANICS (with Dynamic Compliance & Resistance) =====
-    const CL_dynamic = getDynamicCompliance(s.volL, p.compL, p.pathology, s.phase, p.lungCapacity/2);
-    const CR_dynamic = getDynamicCompliance(s.volR, p.compR, p.pathology, s.phase, p.lungCapacity/2);
+    const CL_dynamic = getDynamicCompliance(s.volL, p.compL, p.pathology, s.phase, p.lungCapacity/2, p.peep);
+    const CR_dynamic = getDynamicCompliance(s.volR, p.compR, p.pathology, s.phase, p.lungCapacity/2, p.peep);
     const RL_dynamic = getDynamicResistance(p.resL, s.flowL, s.volL, p.pathology, p.lungCapacity/2);
     const RR_dynamic = getDynamicResistance(p.resR, s.flowR, s.volR, p.pathology, p.lungCapacity/2);
     
