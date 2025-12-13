@@ -89,12 +89,14 @@ const getDynamicCompliance = (currentTotalVol_L, baseC_ml, pathology, phase, lun
         } 
         else if (currentPEEP <= 15) {
             // PEEP 8-15: Optimal Recruitment Zone (Compliance ดีขึ้น)
-            peepRecruitmentFactor = 1.0 + ((currentPEEP - 8) * 0.06);
-            peepRecruitmentFactor = Math.min(1.45, peepRecruitmentFactor); // Cap at 1.45
+            // Enhanced recruitment effect based on clinical studies showing PEEP response (e.g., Goligher, 2014)
+            peepRecruitmentFactor = 1.0 + ((currentPEEP - 8) * 0.07); // Adjusted 0.06 -> 0.07 for steeper climb
+            peepRecruitmentFactor = Math.min(1.50, peepRecruitmentFactor); // Cap at 1.50 (was 1.45)
         } 
         else {
             // PEEP > 15: Overdistension Risk / Recruitment Plateau (Compliance เริ่มลด)
-            peepRecruitmentFactor = 1.45 - ((currentPEEP - 15) * 0.05); 
+            // Steeper drop-off for higher PEEP, aligning with overdistension risk
+            peepRecruitmentFactor = 1.50 - ((currentPEEP - 15) * 0.08); // Adjusted 1.45->1.50, 0.05->0.08 for steeper drop
             peepRecruitmentFactor = Math.max(1.0, peepRecruitmentFactor); // Min 1.0
         }
         break;
@@ -626,13 +628,25 @@ const App = () => {
         const V_PEEP_Vol_mL = (p.peep * (p.compL + p.compR)) + (p.frcOffset * 1000);
         const VPeakRel_Derived = Math.max(0, VPeakAbs_Measured - V_PEEP_Vol_mL);
 
-        // ===== OXYGENATION MODEL =====
+        // ===== OXYGENATION MODEL (ARDS PEEP/Pplat Influence on Shunt) =====
         const baseShunt = p.shunt;        
         const baseDeadspace = p.deadspace; 
-        const PmeanEffect = Math.max(0, (s.pawSum / Math.max(1, s.pawCount)) - 5) * 0.01; 
-        const actualShunt = Math.max(0.01, baseShunt - PmeanEffect);
+        
+        // PEEP Recruitment Effect (Prevents atelectrauma/shunt) - Higher PEEP recruits collapsed alveoli, reducing shunt [cite: 145, 153]
+        const PEEP_Shunt_Reduction = Math.min(baseShunt, Math.max(0, p.peep - 5) * 0.02); 
+        
+        // Pplat Overdistension Penalty (VILI/Shunt Increase) - High Pplat (>28) increases risk of VILI/overdistension 
+        const Pplat_Shunt_Increase = Math.max(0, s.pPlatTemp - 28) * 0.03; 
+        
+        // Driving Pressure Effect (VILI/Shunt Increase) - High Driving Pressure (>15 cmH2O) is independently associated with poor outcome 
+        const drivingP_Monitored = Math.max(1, s.pPlatTemp - p.peep);
+        const DP_Shunt_Increase = Math.max(0, drivingP_Monitored - 15) * 0.015;
+
+        // Final Actual Shunt is base shunt adjusted by PEEP (recruitment) and Pplat/DP (VILI/overdistension)
+        const actualShunt = Math.max(0.01, baseShunt - PEEP_Shunt_Reduction + Pplat_Shunt_Increase + DP_Shunt_Increase);
         
         let estimatedSpO2 = 99;
+        // Shunt has a significant impact on SpO2
         estimatedSpO2 -= (actualShunt * 100) * 1.5; 
         const fio2EffectFactor = (p.fiO2 - 0.40) * 15; 
         estimatedSpO2 += fio2EffectFactor;
