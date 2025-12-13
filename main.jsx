@@ -16,130 +16,82 @@ const EXP_RESISTANCE_MULTIPLIER = 1.5;
 // Circuit compliance (ml/cmH2O)
 const CIRCUIT_COMPLIANCE = 2.5;
 
-// ==================== ADVANCED PHYSICS: DYNAMIC COMPLIANCE ====================
-// Implements: Hysteresis, Non-linear S-shape, Lower/Upper Inflection Points
-// References: PDF 3, 4 - Hysteresis & Elastic Properties
+// --- ADVANCED PHYSICS: NON-LINEAR COMPLIANCE & HYSTERESIS (Balloon Effect) ---
+// Logic: รับค่า Total Volume (รวม FRC/AirTrapping) เพื่อคำนวณความตึงตัว (Distension)
 const getDynamicCompliance = (currentTotalVol_L, baseC_ml, pathology, phase, lungCapacity_L) => {
-  const baseC_L = baseC_ml / 1000;
-  
-  // Define inflection points based on pathology
-  let lowerInflection_L = 0.1;
-  let upperInflection_L = lungCapacity_L * 0.75;
+  const baseC_L = baseC_ml / 1000; // Convert base compliance to L/cmH2O
+  // ตั้งค่า Thresholds จุดดัดโค้งของกราฟตามโรค
+  let lowerInflection_L = 0.1; // Upper inflection คือจุดที่ปอดเริ่มตึง (ใกล้ Capacity)
+  let upperInflection_L = lungCapacity_L * 0.75; // เริ่มตึงที่ 75% ของความจุ
   let distensionFactor = 10;
-  let sigFactor = 1.5; // Sigmoid steepness for S-curve
-
   switch (pathology) {
     case 'ARDS':
-      // Baby Lung: High inflection points, steep dropout at top
-      lowerInflection_L = 0.2;
+      // Baby Lung: เนื้อปอดดีเหลือน้อย ต้องใช้แรงเปิด (Lower inflection สูง) และตึงเร็ว
+      lowerInflection_L = 0.15;
       upperInflection_L = lungCapacity_L * 0.6;
-      distensionFactor = 25;
-      sigFactor = 2.5;
+      distensionFactor = 20; // ตึงเร็วมาก
       break;
     case 'FIBROSIS':
-      // Restrictive: Low compliance throughout, early upper inflection
+      // Restrictive: กราฟนอน ปอดแข็ง ขยายได้นิดเดียวก็ตึง
       lowerInflection_L = 0.05;
       upperInflection_L = lungCapacity_L * 0.5;
-      distensionFactor = 30;
-      sigFactor = 3.0;
+      distensionFactor = 25;
       break;
     case 'EMPHYSEMA':
     case 'COPD':
-      // Obstructive: High C initially, but Air Trapping increases effective volume
-      lowerInflection_L = 0.0;
+      // Obstructive: High Compliance ช่วงแรก แต่ถ้า Air Trapping จน Volume สูง จะตึง (ตามข้อ 10)
+      lowerInflection_L = 0.0; // เป่าง่ายตั้งแต่เริ่ม
       upperInflection_L = lungCapacity_L * 0.8;
-      distensionFactor = 12;
-      sigFactor = 1.2;
+      distensionFactor = 8;
       break;
     default: // NORMAL
       lowerInflection_L = 0.1;
       upperInflection_L = lungCapacity_L * 0.85;
-      distensionFactor = 10;
-      sigFactor = 1.5;
+      break;
   }
-
   let effectiveC = baseC_L;
 
-  // ===== SIGMOID S-CURVE FOR NORMAL PHYSIOLOGY =====
-  // Creates smooth transition between low and high compliance regions
-  if (pathology === 'NORMAL' || pathology === 'CUSTOM') {
-    const midpoint = (lowerInflection_L + upperInflection_L) / 2;
-    const sigmoid = 1 / (1 + Math.exp(-sigFactor * (currentTotalVol_L - midpoint) / (upperInflection_L - lowerInflection_L)));
-    effectiveC = baseC_L * (0.4 + 0.6 * sigmoid);
-  }
-
-  // ===== RECRUITMENT PHASE (Inspiration): Lower Compliance =====
-  // Effort to open collapsed alveoli requires additional pressure
+  // --- HYSTERESIS LOGIC (Recruitment Force) ---
+  // ช่วงหายใจเข้า C จะต่ำกว่าหายใจออกเล็กน้อย (ต้องใช้แรงถ่าง)
   if (phase === 'INS' || phase === 'HOLD_INS' || phase === 'REC') {
     if (currentTotalVol_L < lowerInflection_L) {
-      // Sigmoid recruitment: hard at start, eases off
-      const recruitSig = 1 / (1 + Math.exp(-5 * (currentTotalVol_L / lowerInflection_L)));
-      effectiveC = baseC_L * (0.3 + 0.7 * recruitSig);
+      const factor = 0.5 + (0.5 * (currentTotalVol_L / lowerInflection_L));
+      effectiveC = baseC_L * factor;
     }
   }
 
-  // ===== BALLOON EFFECT (Overdistension): Stiffness increases =====
-  // At high volumes, tissue tension + surface tension resist further expansion
+  // --- BALLOON EFFECT (Overdistension) ---
+  // เมื่อปริมาตรเกิน Upper Inflection (ปอดตึง) Compliance จะลดลงฮวบ
   if (currentTotalVol_L > upperInflection_L) {
     const excessVol = currentTotalVol_L - upperInflection_L;
-    // Exponential stiffness increase (collagen fiber stretch resistance)
+    // ยิ่งเกินเยอะ ยิ่งแข็ง (Exponential decay)
     const stiffness = Math.exp(-excessVol * distensionFactor);
     effectiveC = baseC_L * stiffness;
   }
 
-  // ===== HYSTERESIS EFFECT (Expiration > Inspiration) =====
-  // Surfactant concentration during expiration improves compliance
-  if (phase === 'EXP' || phase === 'HOLD_EXP') {
-    // Expiratory compliance 10-20% higher due to surfactant desorption
-    effectiveC *= 1.15;
-  }
-
-  // Safety: Minimum compliance 2 ml/cmH2O
+  // ป้องกันค่า Compliance เป็น 0 หรือติดลบ (Minimum 2 ml/cmH2O)
   return Math.max(0.002, effectiveC);
 };
 
-// ==================== ADVANCED PHYSICS: DYNAMIC RESISTANCE ====================
-// Implements: Rohrer Equation (K1*Flow + K2*Flow²), Airway Tethering, Dynamic Compression
-// References: PDF 5, 6 - Resistance physiology
-const getDynamicResistance = (baseR, currentFlow_Lps, currentVol_L, pathology, lungCapacity_L) => {
-  // Rohrer coefficients: K1 (laminar/viscosity) + K2 (turbulent/density)
-  let K1 = 0.05; // Baseline viscous component
-  let K2 = 0.3;  // Baseline turbulent component
-
+// --- ADVANCED PHYSICS: DYNAMIC RESISTANCE (Rohrer's Equation & Airway Tethering) ---
+// อ้างอิงจาก PDF: "Resistance increases with increasing airflow" (Turbulence)
+// และ "Resistance decreases on a hyperbolic curve as airway diameter... stretches" (Volume dependence)
+const getDynamicResistance = (baseR, currentFlow_Lps, currentVol_L, pathology) => {
+  // 1. Flow Dependence (Rohrer's equation component: K2 * Flow)
+  // Flow ยิ่งแรง แรงต้านยิ่งเยอะ (Turbulent)
+  let turbulenceFactor = 0.5;
+  // 2. Volume Dependence (Airway Tethering)
+  // Volume ยิ่งเยอะ ท่อลมยิ่งถูกดึงให้ถ่างออก -> R ลดลง
+  let volumeFactor = 2.0;
   if (pathology === 'COPD' || pathology === 'EMPHYSEMA') {
-    // Higher turbulence in narrowed airways + mucus plugging
-    K1 = 0.08;
-    K2 = 0.8;
-  } else if (pathology === 'FIBROSIS') {
-    K1 = 0.04; // Less turbulence (stiffer airways)
-    K2 = 0.2;
+    turbulenceFactor = 2.5; // ทางเดินหายใจตีบง่าย เกิด turbulence ง่ายกว่า
+    volumeFactor = 5.0; // ผลกระทบของ Volume ต่อ R ชัดเจนกว่า (Dynamic compression สูงมากเมื่อ Vol ต่ำ)
   }
-
-  // ===== ROHRER EQUATION COMPONENT =====
-  // Pressure drop = K1*V + K2*V² (V = flow velocity)
-  const flowMagnitude = Math.abs(currentFlow_Lps);
-  const laminarComponent = K1 * flowMagnitude;
-  const turbulentComponent = K2 * flowMagnitude * flowMagnitude;
-  const flowDependentR = baseR + laminarComponent + turbulentComponent;
-
-  // ===== AIRWAY TETHERING: Volume-dependent conductance increase =====
-  // Higher lung volume = larger airways = lower resistance (hyperbolic decay)
-  const tethering = currentVol_L / (lungCapacity_L / 2);
-  const volumeFactor = 1 / (1 + 2 * tethering); // Conductance curve
-  const volumeDependentR = flowDependentR * (0.5 + 0.5 * volumeFactor);
-
-  // ===== DYNAMIC COMPRESSION EFFECT (Flow Limitation) =====
-  // In COPD/emphysema: Early airway closure at low volumes + high RR
-  let compressionFactor = 1.0;
-  if ((pathology === 'COPD' || pathology === 'EMPHYSEMA') && currentVol_L < lungCapacity_L * 0.3) {
-    // Airway collapse risk increases exponentially as volume drops
-    const collapseRisk = Math.exp(-3 * (currentVol_L / (lungCapacity_L * 0.3)));
-    compressionFactor = 1.0 + (collapseRisk * 2); // Up to 3x resistance
-  }
-
-  const effectiveR = volumeDependentR * compressionFactor;
-
-  // Safety: Don't go below 30% of baseline
+  const flowEffect = Math.abs(currentFlow_Lps) * turbulenceFactor;
+  // ใช้สูตร hyperbolic decay อย่างง่าย: R ลดลงเมื่อ Vol เพิ่ม
+  const volEffect = Math.min(baseR * 0.6, currentVol_L * volumeFactor);
+  let effectiveR = baseR + flowEffect - volEffect;
+  // Safety clamp: ไม่ให้ R ต่ำกว่า 30% ของค่าตั้งต้น
   return Math.max(baseR * 0.3, effectiveR);
 };
 
@@ -255,12 +207,11 @@ const App = () => {
   const displayedScalesRef = useRef({ pMax: 40, fMax: 60, vMax: 600 });
   
   // Monitored values
-  const [monitoredValues, setMonitoredValues] = useState({
+const [monitoredValues, setMonitoredValues] = useState({
     Pplat: 0, Pmean: 0, Cstat: 0, AutoPEEP: 0,
     TotalRR: 0, MV: 0, VtExp: 0,
     VPeakAbs: 0, VPeakRel: 0,
-    SpO2: 98, EtCO2: 35,
-    FlowLimitationDetected: false // NEW: Track flow limitation
+    SpO2: 98, EtCO2: 35
   });
   
   const [backupActive, setBackupActive] = useState(false);
@@ -285,11 +236,6 @@ const App = () => {
     isBackupCycle: false,
     holdTimer: 0,
     pPlatCaptured: false,
-    
-    // NEW: Flow limitation tracking
-    prevFlow: 0,
-    prevPaw: 0,
-    flowLimitationCounter: 0
   });
   
   // History for graphs
@@ -396,10 +342,7 @@ const App = () => {
       timeSinceLastBreath: 0,
       isBackupCycle: false,
       holdTimer: 0,
-      pPlatCaptured: false,
-      prevFlow: 0,
-      prevPaw: p.peep,
-      flowLimitationCounter: 0
+      pPlatCaptured: false
     };
     
     history.current.paw.fill(p.peep);
@@ -425,8 +368,7 @@ const App = () => {
       Pplat: p.peep, Pmean: p.peep, Cstat: 0, AutoPEEP: 0,
       TotalRR: 0, MV: 0, VtExp: 0,
       VPeakAbs: initialVolAbs, VPeakRel: 0,
-      SpO2: 98, EtCO2: 35,
-      FlowLimitationDetected: false
+      SpO2: 98, EtCO2: 35
     });
     
     setBackupActive(false);
@@ -495,8 +437,8 @@ const App = () => {
     // ===== LUNG MECHANICS (with Dynamic Compliance & Resistance) =====
     const CL_dynamic = getDynamicCompliance(s.volL, p.compL, p.pathology, s.phase, p.lungCapacity/2);
     const CR_dynamic = getDynamicCompliance(s.volR, p.compR, p.pathology, s.phase, p.lungCapacity/2);
-    const RL_dynamic = getDynamicResistance(p.resL, s.flowL, s.volL, p.pathology, p.lungCapacity/2);
-    const RR_dynamic = getDynamicResistance(p.resR, s.flowR, s.volR, p.pathology, p.lungCapacity/2);
+    const RL_dynamic = getDynamicResistance(p.resL, s.flowL, s.volL, p.pathology);
+    const RR_dynamic = getDynamicResistance(p.resR, s.flowR, s.volR, p.pathology);
     
     // Absolute volume (includes PEEP + FRC)
     const V_Absolute_L_Current = s.volL + s.volR;
@@ -625,9 +567,6 @@ const App = () => {
       if (estimatedEtCO2 > 100) estimatedEtCO2 = 100;
       if (estimatedEtCO2 < 10) estimatedEtCO2 = 10;
       
-      // NEW: Detect flow limitation
-      const flowLimitationDetected = s.flowLimitationCounter > 5;
-      
       setMonitoredValues(m => ({
         ...m,
         TotalRR: instantRR,
@@ -640,8 +579,7 @@ const App = () => {
         Pplat: s.pPlatTemp,
         Pmean: s.pawSum / Math.max(1, s.pawCount),
         SpO2: Math.round(estimatedSpO2),
-        EtCO2: Math.round(estimatedEtCO2),
-        FlowLimitationDetected: flowLimitationDetected
+        EtCO2: Math.round(estimatedEtCO2)
       }));
       
       s.phase = 'INS';
@@ -662,7 +600,6 @@ const App = () => {
       s.pawCount = 0;
       s.pPlatCaptured = false;
       s.volPeakCycle = V_EndExp_mL;
-      s.flowLimitationCounter = 0;
     }
     
     // ===== MODE-SPECIFIC CONTROL LOGIC =====
@@ -801,20 +738,6 @@ const App = () => {
       s.volPeakCycle = Math.max(s.volPeakCycle, V_Absolute_mL);
       if (s.cycleTime > d.inspDuration * 0.95) s.pPlatTemp = (PalvL + PalvR) / 2;
     }
-    
-    // ===== FLOW LIMITATION DETECTION =====
-    // Flow limitation: Paw increases but flow doesn't increase (or decreases)
-    if (s.phase === 'EXP' && s.flowTotal < -0.1) { // Negative flow = expiration
-      const dFlow = s.flowTotal - s.prevFlow;
-      const dPaw = currentPaw - s.prevPaw;
-      if (dPaw > 0.5 && dFlow < 0.05) { // Paw up, Flow not up
-        s.flowLimitationCounter++;
-      } else {
-        s.flowLimitationCounter = Math.max(0, s.flowLimitationCounter - 1);
-      }
-    }
-    s.prevFlow = s.flowTotal;
-    s.prevPaw = currentPaw;
     
     // History recording
     history.current.paw.push(s.paw);
@@ -1359,10 +1282,6 @@ const App = () => {
                 <div className="bg-slate-600 p-2 rounded">
                   <div className="font-semibold text-pink-400">EtCO2</div>
                   <div className="text-lg">{monitoredValues.EtCO2} mmHg</div>
-                </div>
-                <div className={`${monitoredValues.FlowLimitationDetected ? 'bg-red-600' : 'bg-slate-600'} p-2 rounded`}>
-                  <div className="font-semibold text-red-400">Flow Limit</div>
-                  <div className="text-lg">{monitoredValues.FlowLimitationDetected ? 'YES' : 'NO'}</div>
                 </div>
               </div>
             </div>
