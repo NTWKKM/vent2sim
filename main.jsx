@@ -332,8 +332,7 @@ const App = () => {
   const canvasRefF = useRef(null);
   const canvasRefV = useRef(null);
   const canvasRefPV = useRef(null); 
-  const canvasRefFV = useRef(null);
-  const canvasRefVT = useRef(null); 
+  const canvasRefFV = useRef(null); 
   
   // --- Derived Calculations ---
   const derivedParams = useMemo(() => {
@@ -920,9 +919,8 @@ const App = () => {
     const ctxP = canvasRefP.current?.getContext('2d');
     const ctxF = canvasRefF.current?.getContext('2d');
     const ctxV = canvasRefV.current?.getContext('2d');
-    const ctxVT = canvasRefVT.current?.getContext('2d');
 
-    if (!ctxP || !ctxF || !ctxV || !ctxVT) return;
+    if (!ctxP || !ctxF || !ctxV) return;
     
     updateAutoScales(); 
 
@@ -1009,12 +1007,8 @@ const App = () => {
     drawLine(ctxF, history.current.flowL, '#3b82f6', sF, -sF, true); 
     ctxF.globalAlpha = 1.0;
     drawAxisAndGrid(ctxV, sV, 0, 'Volume (ml)', '#3b82f6', false); 
-    drawLine(ctxV, history.current.vol, '#3b82f6', sV, 0, false);
-
-    // --- Volume-Time Curve (NEW - for all pathologies: COPD, Emphysema, Pulmonary Edema, Unilateral) ---
-    drawAxisAndGrid(ctxVT, sV, 0, 'Volume-Time (ml)', '6366f1', false);
-    drawLine(ctxVT, history.current.vol, '6366f1', sV, 0, false); 
-  }, [updateAutoScales, canvasRefVT]);
+    drawLine(ctxV, history.current.vol, '#3b82f6', sV, 0, false); 
+  }, [updateAutoScales]);
   
   // --- Loop Drawing ---
   const drawLoops = useCallback(() => {
@@ -1234,12 +1228,6 @@ const App = () => {
                         <span className="block text-indigo-400">Max (Abs): {monitoredValues.VPeakAbs.toFixed(0)} ml</span>
                     </div>
                   <canvas ref={canvasRefV} width={800} height={128} className="w-full h-full" />
-
-          {/* Volume-Time Curve - NEW */}
-          <div className="relative h-32 bg-gray-800 rounded border border-gray-400 overflow-hidden">
-            <div className="absolute top-2 right-2 text-indigo-400 text-xs font-bold z-10">Volume-Time Curve</div>
-            <canvas ref={canvasRefVT} width={800} height={128} className="w-full h-full" />
-          </div>
                 </div>
               </div>
             </div>
