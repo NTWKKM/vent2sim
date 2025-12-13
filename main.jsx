@@ -61,9 +61,9 @@ const getDynamicResistance = (baseR, currentFlow_Lps, currentVol_L, pathology, l
     return Math.max(baseR * 0.3, effectiveR);
 };
 
-// ==================== ADVANCED PHYSICS: DYNAMIC COMPLIANCE (NEW) ====================
+// ==================== ADVANCED PHYSICS: DYNAMIC COMPLIANCE (UPDATED FOR ARDS PEEP) ====================
 // Implements: Hysteresis, Non-linear S-shape, Lower/Upper Inflection Points
-const getDynamicCompliance = (currentTotalVol_L, baseC_ml, pathology, phase, lungCapacity_L) => {
+const getDynamicCompliance = (currentTotalVol_L, baseC_ml, pathology, phase, lungCapacity_L, currentPEEP) => {
     const baseC_L = baseC_ml / 1000;
     
     // Define inflection points based on pathology
@@ -71,7 +71,8 @@ const getDynamicCompliance = (currentTotalVol_L, baseC_ml, pathology, phase, lun
     let upperInflection_L = lungCapacity_L * 0.75;
     let distensionFactor = 10;
     let sigFactor = 1.5; // Sigmoid steepness for S-curve
-  
+    let peepRecruitmentFactor = 1.0; // NEW: PEEP adjustment factor
+
     switch (pathology) {
       case 'ARDS':
         // Baby Lung: High inflection points, steep dropout at top
@@ -79,19 +80,22 @@ const getDynamicCompliance = (currentTotalVol_L, baseC_ml, pathology, phase, lun
         upperInflection_L = lungCapacity_L * 0.6;
         distensionFactor = 25;
         sigFactor = 2.5;
-        // **NEW ARDS PEEP DYNAMIC FACTOR**
-        // PEEP < 8: ปอดแฟบหนัก (Compliance แย่ลง)
+        
+        // **NEW ARDS PEEP DYNAMIC FACTOR (Recruitment Logic)**
         if (currentPEEP < 8) {
-            peepRecruitmentFactor = 0.6 + (currentPEEP * 0.05); // Min 0.6, max 1.0
+            // PEEP < 8: ปอดแฟบหนัก (Derecruitment) -> Compliance แย่ลง
+            peepRecruitmentFactor = 0.6 + (currentPEEP * 0.05); 
+            peepRecruitmentFactor = Math.max(0.6, peepRecruitmentFactor);
         } 
-        // PEEP 8-15: Optimal Recruitment Zone (Compliance ดีขึ้น)
         else if (currentPEEP <= 15) {
-            peepRecruitmentFactor = 1.0 + ((currentPEEP - 8) * 0.06); // Max ~1.42
+            // PEEP 8-15: Optimal Recruitment Zone (Compliance ดีขึ้น)
+            peepRecruitmentFactor = 1.0 + ((currentPEEP - 8) * 0.06);
+            peepRecruitmentFactor = Math.min(1.45, peepRecruitmentFactor); // Cap at 1.45
         } 
-        // PEEP > 15: Overdistension Risk / Recruitment Plateau (Compliance เริ่มลด)
         else {
-            peepRecruitmentFactor = 1.45 - ((currentPEEP - 15) * 0.05); // เริ่มลดลง
-            peepRecruitmentFactor = Math.max(1.0, peepRecruitmentFactor);
+            // PEEP > 15: Overdistension Risk / Recruitment Plateau (Compliance เริ่มลด)
+            peepRecruitmentFactor = 1.45 - ((currentPEEP - 15) * 0.05); 
+            peepRecruitmentFactor = Math.max(1.0, peepRecruitmentFactor); // Min 1.0
         }
         break;
       case 'FIBROSIS':
@@ -125,12 +129,6 @@ const getDynamicCompliance = (currentTotalVol_L, baseC_ml, pathology, phase, lun
       const sigmoid = 1 / (1 + Math.exp(-sigFactor * (currentTotalVol_L - midpoint) / (upperInflection_L - lowerInflection_L)));
       effectiveC = baseC_L * (0.4 + 0.6 * sigmoid);
     }
-    // ===== APPLY ARDS PEEP FACTOR =====
-    if (pathology === 'ARDS') {
-        effectiveC *= peepRecruitmentFactor;
-    }
-    // Safety: Minimum compliance 2 ml/cmH2O
-    return Math.max(0.002, effectiveC);
   
     // ===== RECRUITMENT PHASE (Inspiration): Lower Compliance =====
     // Effort to open collapsed alveoli requires additional pressure
@@ -157,6 +155,11 @@ const getDynamicCompliance = (currentTotalVol_L, baseC_ml, pathology, phase, lun
       // Expiratory compliance 10-20% higher due to surfactant desorption
       effectiveC *= 1.15;
     }
+
+    // ===== APPLY ARDS PEEP FACTOR (Recruitment) =====
+    if (pathology === 'ARDS') {
+        effectiveC *= peepRecruitmentFactor;
+    }
   
     // Safety: Minimum compliance 2 ml/cmH2O
     return Math.max(0.002, effectiveC);
@@ -173,12 +176,11 @@ const PATHOLOGY_PRESETS = {
   },
   ARDS: { 
       name: 'ARDS (Stiff Lungs)', 
-      // เปลี่ยน compL/R เป็น 35 และ lungCapacity เป็น 3.0
-      resL: 15, compL: 35, resR: 15, compR: 35, 
+      resL: 15, compL: 35, resR: 15, compR: 35, // Adjusted to 35
       shunt: 0.30, deadspace: 0.35, 
       frcOffset: 0.0, 
-      lungCapacity: 3.0, // <-- แก้ไข: ใช้ค่าที่สมจริงสำหรับ Predicted Value
-      note: 'Low compliance. Optimal PEEP is crucial for recruitment and improving Cstat.' 
+      lungCapacity: 3.0, // Adjusted to 3.0L for Predicted Value
+      note: 'Low compliance. Optimal PEEP is crucial for recruitment and improving Cstat.' // Updated Note
   },
   COPD: { 
       name: 'COPD (Mild/Mod)', 
@@ -449,7 +451,7 @@ const App = () => {
     setExpHoldRequest(false);
     setHoldStatus(null);
 
-  }, [params.compL, params.compR, params.resL, params.resR, params.pathology, params.mode, params.frcOffset, params.lungCapacity]); 
+  }, [params.compL, params.compR, params.resL, params.resR, params.pathology, params.mode, params.frcOffset, params.lungCapacity, params.peep, params.inspiratoryPressure, params.tidalVolume]); // Added PEEP, inspiratoryPressure, tidalVolume to dependencies
 
   useEffect(() => {
     resetSimState();
@@ -512,6 +514,7 @@ const App = () => {
     s.timeSinceLastBreath += DT;
     
     // ===== LUNG MECHANICS (with Dynamic Compliance & Resistance) =====
+    // CALL Dynamic Compliance with current PEEP to enable ARDS Recruitment Logic
     const CL_dynamic = getDynamicCompliance(s.volL, p.compL, p.pathology, s.phase, p.lungCapacity/2, p.peep);
     const CR_dynamic = getDynamicCompliance(s.volR, p.compR, p.pathology, s.phase, p.lungCapacity/2, p.peep);
     const RL_dynamic = getDynamicResistance(p.resL, s.flowL, s.volL, p.pathology, p.lungCapacity/2);
@@ -603,6 +606,7 @@ const App = () => {
         }
         s.lastBreathTime = now;
 
+        // Use the dynamic compliance value for Pplat/AutoPEEP calculation at end of EXP
         const PelL_EndExp = s.volL / CL_dynamic;
         const PelR_EndExp = s.volR / CR_dynamic;
         const PalvMean = (PelL_EndExp + PelR_EndExp) / 2;
