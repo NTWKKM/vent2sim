@@ -155,8 +155,9 @@ const PATHOLOGY_PRESETS = {
       name: 'ARDS (Stiff Lungs)', 
       resL: 15, compL: 30, resR: 15, compR: 30, 
       shunt: 0.30, deadspace: 0.35, 
-      frcOffset: 0.0, lungCapacity: 1.0, 
-      note: 'Low compliance, high inflection points. Needs recruitment.' 
+      frcOffset: 0.0, 
+      lungCapacity: 3.0, // <--- แก้เป็น 3.0 ตามที่ขอครับ (เดิม 1.0)
+      note: 'Low compliance. Adjusted Capacity (3.0L) to avoid early overdistension.' 
   },
   COPD: { 
       name: 'COPD (Mild/Mod)', 
