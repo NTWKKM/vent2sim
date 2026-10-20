@@ -1198,21 +1198,42 @@ const App = () => {
 
   // Draw P/V and F/V Loops
   const drawLoops = useCallback(() => {
-    const ctxPV = canvasRefPV.current?.getContext('2d');
-    const ctxFV = canvasRefFV.current?.getContext('2d');
-    if (!ctxPV || !ctxFV) return;
+    const canvasPV = canvasRefPV.current;
+    const canvasFV = canvasRefFV.current;
+    if (!canvasPV || !canvasFV) return;
 
-    const w = ctxPV.canvas.width;
-    const h = ctxPV.canvas.height;
-    const padL = 38, padR = 12, padB = 30, padT = 18;
-    const innerW = w - padL - padR;
-    const innerH = h - padT - padB;
+    // Dynamically synchronize canvas resolution to container size on screen resize
+    const rectPV = canvasPV.getBoundingClientRect();
+    const targetW_PV = Math.floor(rectPV.width) || canvasPV.clientWidth || 300;
+    const targetH_PV = Math.floor(rectPV.height) || canvasPV.clientHeight || 180;
+    if (targetW_PV > 10 && (canvasPV.width !== targetW_PV || canvasPV.height !== targetH_PV)) {
+      canvasPV.width = targetW_PV;
+      canvasPV.height = targetH_PV;
+    }
+
+    const rectFV = canvasFV.getBoundingClientRect();
+    const targetW_FV = Math.floor(rectFV.width) || canvasFV.clientWidth || 300;
+    const targetH_FV = Math.floor(rectFV.height) || canvasFV.clientHeight || 180;
+    if (targetW_FV > 10 && (canvasFV.width !== targetW_FV || canvasFV.height !== targetH_FV)) {
+      canvasFV.width = targetW_FV;
+      canvasFV.height = targetH_FV;
+    }
+
+    const ctxPV = canvasPV.getContext('2d');
+    const ctxFV = canvasFV.getContext('2d');
+    if (!ctxPV || !ctxFV) return;
 
     const pMax = scalesRef.current.pMax;
     const vMax = scalesRef.current.vMax;
     const fMax = scalesRef.current.fMax;
 
     const drawLoopGrid = (ctx, xMax, yMax, xLabel, yLabel, midZeroY = false) => {
+      const w = ctx.canvas.width;
+      const h = ctx.canvas.height;
+      const padL = 36, padR = 12, padB = 26, padT = 16;
+      const innerW = Math.max(10, w - padL - padR);
+      const innerH = Math.max(10, h - padT - padB);
+
       ctx.clearRect(0, 0, w, h);
       ctx.strokeStyle = '#374151';
       ctx.fillStyle = '#9ca3af';
@@ -1244,7 +1265,7 @@ const App = () => {
       }
       ctx.fillStyle = '#e2e8f0';
       ctx.font = 'bold 10px sans-serif';
-      ctx.fillText(xLabel, padL + innerW / 2, h - 4);
+      ctx.fillText(xLabel, padL + innerW / 2, h - 3);
 
       // Y Ticks
       ctx.textAlign = 'right';
@@ -1270,7 +1291,7 @@ const App = () => {
       ctx.textAlign = 'left';
       ctx.fillStyle = '#e2e8f0';
       ctx.font = 'bold 10px sans-serif';
-      ctx.fillText(yLabel, 6, 12);
+      ctx.fillText(yLabel, 6, 11);
 
       if (midZeroY) {
         const midY = padT + innerH / 2;
@@ -1284,6 +1305,12 @@ const App = () => {
 
     const drawLoopLine = (ctx, data, color, xKey, yKey, xMax, yMax, midZeroY = false) => {
       if (data.length < 2) return;
+      const w = ctx.canvas.width;
+      const h = ctx.canvas.height;
+      const padL = 36, padR = 12, padB = 26, padT = 16;
+      const innerW = Math.max(10, w - padL - padR);
+      const innerH = Math.max(10, h - padT - padB);
+
       ctx.beginPath();
       ctx.strokeStyle = color;
       ctx.lineWidth = 2;
@@ -1672,58 +1699,60 @@ const App = () => {
             )}
 
             {/* MONITOR CARDS & REAL-TIME LOOPS */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 md:grid-cols-[auto_1fr_1fr] gap-4 items-stretch">
 
               {/* Monitored Parameters List */}
-              <div className="bg-white rounded-xl p-4 shadow-lg border border-gray-300 space-y-2">
-                <h4 className="text-xs font-bold uppercase tracking-wider text-gray-600 flex items-center mb-2">
-                  <BarChart2 className="w-3.5 h-3.5 mr-1.5 text-blue-600" />
+              <div className="bg-white rounded-xl p-3 shadow-md border border-gray-300 flex flex-col justify-between h-full min-w-[210px]">
+                <h4 className="text-xs font-bold uppercase tracking-wider text-gray-600 flex items-center mb-1">
+                  <BarChart2 className="w-3.5 h-3.5 mr-1.5 text-blue-600 shrink-0" />
                   Primary Readouts
                 </h4>
-                <div className="space-y-1.5 text-xs">
-                  <div className="flex justify-between border-b border-gray-100 pb-1">
-                    <span className="text-gray-600">P-Plateau</span>
-                    <span className="font-mono font-bold text-red-600">{monitoredValues.Pplat.toFixed(1)} cmH2O</span>
+                <div className="flex-1 flex flex-col justify-between text-xs w-full py-0.5 space-y-1">
+                  <div className="flex justify-between items-center border-b border-gray-100 py-0.5">
+                    <span className="text-gray-600 whitespace-nowrap mr-3">P-Plateau</span>
+                    <span className="font-mono font-bold text-red-600 text-right whitespace-nowrap">{monitoredValues.Pplat.toFixed(1)} cmH2O</span>
                   </div>
-                  <div className="flex justify-between border-b border-gray-100 pb-1">
-                    <span className="text-gray-600">Paw Mean</span>
-                    <span className="font-mono font-bold text-amber-600">{monitoredValues.Pmean.toFixed(1)} cmH2O</span>
+                  <div className="flex justify-between items-center border-b border-gray-100 py-0.5">
+                    <span className="text-gray-600 whitespace-nowrap mr-3">Paw Mean</span>
+                    <span className="font-mono font-bold text-amber-600 text-right whitespace-nowrap">{monitoredValues.Pmean.toFixed(1)} cmH2O</span>
                   </div>
-                  <div className="flex justify-between border-b border-gray-100 pb-1">
-                    <span className="text-gray-600">PEEPi (Auto-PEEP)</span>
-                    <span className={`font-mono font-bold ${monitoredValues.AutoPEEP > 1.5 ? 'text-red-600 animate-pulse' : 'text-gray-800'}`}>
+                  <div className="flex justify-between items-center border-b border-gray-100 py-0.5">
+                    <span className="text-gray-600 whitespace-nowrap mr-3">PEEPi</span>
+                    <span className={`font-mono font-bold text-right whitespace-nowrap ${monitoredValues.AutoPEEP > 1.5 ? 'text-red-600 animate-pulse' : 'text-gray-800'}`}>
                       {monitoredValues.AutoPEEP.toFixed(1)} cmH2O
                     </span>
                   </div>
-                  <div className="flex justify-between border-b border-gray-100 pb-1">
-                    <span className="text-gray-600">Static Comp (Cstat)</span>
-                    <span className="font-mono font-bold text-purple-600 text-right">{monitoredValues.Cstat.toFixed(1)} ml/cmH2O</span>
+                  <div className="flex justify-between items-center border-b border-gray-100 py-0.5">
+                    <span className="text-gray-600 whitespace-nowrap mr-3">Cstat</span>
+                    <span className="font-mono font-bold text-purple-600 text-right whitespace-nowrap">{monitoredValues.Cstat.toFixed(1)} ml/cmH2O</span>
                   </div>
-                  <div className="flex justify-between border-b border-gray-100 pb-1">
-                    <span className="text-gray-600">Airway Res (Raw)</span>
-                    <span className="font-mono font-bold text-blue-600 text-right">{monitoredValues.Raw.toFixed(1)} cmH2O/(L/s)</span>
+                  <div className="flex justify-between items-center border-b border-gray-100 py-0.5">
+                    <span className="text-gray-600 whitespace-nowrap mr-3">Raw</span>
+                    <span className="font-mono font-bold text-blue-600 text-right whitespace-nowrap">{monitoredValues.Raw.toFixed(1)} cmH2O/(L/s)</span>
                   </div>
-                  <div className="flex justify-between border-b border-gray-100 pb-1">
-                    <span className="text-gray-600">Minute Volume (MV)</span>
-                    <span className="font-mono font-bold text-emerald-600">{monitoredValues.MV.toFixed(2)} L/min</span>
+                  <div className="flex justify-between items-center border-b border-gray-100 py-0.5">
+                    <span className="text-gray-600 whitespace-nowrap mr-3">MV (Exp)</span>
+                    <span className="font-mono font-bold text-emerald-600 text-right whitespace-nowrap">{monitoredValues.MV.toFixed(2)} L/min</span>
                   </div>
-                  <div className="flex justify-between pb-1">
-                    <span className="text-gray-600">Total RR</span>
-                    <span className="font-mono font-bold text-blue-600">{monitoredValues.TotalRR.toFixed(1)} /min</span>
+                  <div className="flex justify-between items-center py-0.5">
+                    <span className="text-gray-600 whitespace-nowrap mr-3">Total RR</span>
+                    <span className="font-mono font-bold text-blue-600 text-right whitespace-nowrap">{monitoredValues.TotalRR.toFixed(1)} /min</span>
                   </div>
                 </div>
 
                 {monitoredValues.FlowLimitationDetected && (
-                  <div className="mt-2 bg-red-100 border border-red-400 text-red-700 px-2 py-1 rounded text-center text-[10px] font-bold animate-pulse">
-                    ⚠️ EXPIRATORY FLOW LIMITATION DETECTED
+                  <div className="mt-1 bg-red-100 border border-red-400 text-red-700 px-2 py-0.5 rounded text-center text-[10px] font-bold animate-pulse shrink-0">
+                    ⚠️ FLOW LIMITATION
                   </div>
                 )}
               </div>
 
               {/* P/V Loop */}
-              <div className="relative rounded-xl border border-gray-400 bg-gray-800 p-2 shadow-lg">
-                <canvas ref={canvasRefPV} width={300} height={200} className="w-full h-auto bg-gray-800 rounded" />
-                <div className="absolute bottom-1 left-2 right-2 rounded-b bg-gray-900/95 p-1 text-xs text-white">
+              <div className="relative rounded-xl border border-gray-400 bg-gray-800 p-2 shadow-md flex flex-col justify-between h-full min-h-[220px]">
+                <div className="w-full flex-1 min-h-[120px] relative overflow-hidden">
+                  <canvas ref={canvasRefPV} className="w-full h-full block bg-gray-800 rounded" />
+                </div>
+                <div className="mt-1 rounded-lg bg-gray-900/95 p-1 text-xs text-white border border-gray-700 shrink-0">
                   <div className="flex justify-between items-center font-bold">
                     <span className="text-yellow-400">DRIVING P:</span>
                     <span className="text-lg leading-none text-red-400 font-mono">
@@ -1738,9 +1767,11 @@ const App = () => {
               </div>
 
               {/* F/V Loop */}
-              <div className="relative rounded-xl border border-gray-400 bg-gray-800 p-2 shadow-lg">
-                <canvas ref={canvasRefFV} width={300} height={200} className="w-full h-auto bg-gray-800 rounded" />
-                <div className="absolute bottom-1 left-2 right-2 rounded-b bg-gray-900/95 p-1 text-xs text-white">
+              <div className="relative rounded-xl border border-gray-400 bg-gray-800 p-2 shadow-md flex flex-col justify-between h-full min-h-[220px]">
+                <div className="w-full flex-1 min-h-[120px] relative overflow-hidden">
+                  <canvas ref={canvasRefFV} className="w-full h-full block bg-gray-800 rounded" />
+                </div>
+                <div className="mt-1 rounded-lg bg-gray-900/95 p-1 text-xs text-white border border-gray-700 shrink-0">
                   <div className="flex justify-between items-center font-bold">
                     <span className="text-emerald-400">PEEPi:</span>
                     <span className="text-lg leading-none text-yellow-400 font-mono">
